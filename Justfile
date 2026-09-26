@@ -7,24 +7,24 @@ GREEN := env_var_or_default("GREEN", "../green/.agent/tmp/build/green")
 STRICT := "-std=c89 -pedantic-errors -Wall -Wextra -Werror -Wconversion -Wsign-conversion -Wstrict-prototypes -Wmissing-prototypes -Wold-style-definition -Wundef -Wshadow -Wformat=2 -Wno-long-long"
 POSIX := "-D_POSIX_C_SOURCE=200809L"
 TESTFLAGS := "-Wno-unused-function -Wno-unused-result"
-INC := "-Iinclude -Isrc -I../libappend89/include -I../libappend89/test/support -I../libcksum89/include"
+INC := "-Iinclude -Isrc -I../libappend89/include -I../libappend89/test/support -I../libchecksum89/include"
 WRAPS := "-Wl,--wrap=open -Wl,--wrap=fstat -Wl,--wrap=flock -Wl,--wrap=fcntl -Wl,--wrap=pread -Wl,--wrap=pwrite -Wl,--wrap=write -Wl,--wrap=writev -Wl,--wrap=ftruncate -Wl,--wrap=fdatasync -Wl,--wrap=close -Wl,--wrap=malloc"
-LIBS := "build/libledger89.a ../libappend89/build/libappend89.a ../libcksum89/build/libcksum89.a"
+LIBS := "build/libledger89.a ../libappend89/build/libappend89.a ../libchecksum89/build/libchecksum89.a"
 FAULT := "../libappend89/test/fault/fault.c"
 
 default: build
 
-# Build the ledger89 library against its append89 and cksum89 substrates.
+# Build the ledger89 library against its append89 and checksum89 substrates.
 build:
 	@rm -rf build/obj
 	@mkdir -p build/obj
 	cd ../libappend89 && just build
-	cd ../libcksum89 && just build
+	cd ../libchecksum89 && just build
 	@for f in src/*.c; do \
 	    [ -e "$f" ] || continue; \
 	    name=$(basename "$f" .c); \
 	    {{CC}} {{STRICT}} {{POSIX}} {{CFLAGS}} -Iinclude -Isrc \
-	        -I../libappend89/include -I../libcksum89/include \
+	        -I../libappend89/include -I../libchecksum89/include \
 	        -c "src/$name.c" -o "build/obj/$name.o" || exit 1; \
 	done
 	@objs=""; \
@@ -42,19 +42,19 @@ smoke: build
 tool: build
 	mkdir -p build
 	{{CC}} {{STRICT}} {{POSIX}} -Iinclude -Itool -I../libappend89/include \
-	    -I../libcksum89/include -o build/ledger89 tool/ledger89.c \
+	    -I../libchecksum89/include -o build/ledger89 tool/ledger89.c \
 	    tool/ledger89_cli.c {{LIBS}}
 
 # CLI suite: pure-helper unit tests and end-to-end checks.
 cli: tool
 	mkdir -p build/tmp
 	{{CC}} {{STRICT}} {{POSIX}} {{TESTFLAGS}} -Iinclude -Itool \
-	    -I../libappend89/include -I../libcksum89/include \
+	    -I../libappend89/include -I../libchecksum89/include \
 	    -o build/test_cli test/cli/test_cli.c tool/ledger89_cli.c {{LIBS}}
 	./build/test_cli
 	sh scripts/cli-check.sh ./build/ledger89
 
-# Compile and run every ledger89 test against the append89 + cksum89 substrates.
+# Compile and run every ledger89 test against the append89 + checksum89 substrates.
 test: build
 	@for t in test/test_*.c; do \
 	    [ -e "$t" ] || continue; \

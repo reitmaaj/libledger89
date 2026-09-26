@@ -59,10 +59,10 @@ void ledger89_priv_entry_decode(
 
 unsigned long long ledger89_priv_crc_data(const void *data, size_t size)
 {
-    cksum89_crc64_nvme_ctx ctx;
-    cksum89_u64 value;
-    cksum89_crc64_nvme_init(&ctx);
-    cksum89_crc64_nvme_update(&ctx, data, size);
-    value = cksum89_crc64_nvme_final(&ctx);
+    checksum89_crc64_nvme_ctx ctx;
+    checksum89_u64 value;
+    checksum89_crc64_nvme_init(&ctx);
+    checksum89_crc64_nvme_update(&ctx, data, size);
+    value = checksum89_crc64_nvme_final(&ctx);
     return ((unsigned long long)value.hi << 32) | (unsigned long long)value.lo;
 }

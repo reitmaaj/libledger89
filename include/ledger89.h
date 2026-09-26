@@ -7,7 +7,7 @@
  * file of fixed-size descriptors. The INDEX file defines record boundaries,
  * order, and commit state; the DATA file alone does not.
  *
- * The API is ISO C89. It depends on libappend89 and libcksum89. Public
+ * The API is ISO C89. It depends on libappend89 and libchecksum89. Public
  * functions use the POSIX syscall error profile (CONVENTIONS.md section 14):
  * 0 on success, -1 on failure with errno set to a standard platform value.
  * LEDGER89_OK and LEDGER89_END are ordinary outcomes returned by iteration.

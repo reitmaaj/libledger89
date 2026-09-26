@@ -17,7 +17,7 @@ printf '[\n' > "$out"
 sep=""
 for f in "$root"/src/*.c "$root"/tool/*.c; do
     [ -e "$f" ] || continue
-    printf '%s  {\n    "directory": "%s",\n    "command": "%s -c -D_POSIX_C_SOURCE=200809L -I%s/include -I%s/src -I%s/tool -I%s/../libappend89/include -I%s/../libcksum89/include -o /dev/null %s",\n    "file": "%s"\n  }\n' \
+    printf '%s  {\n    "directory": "%s",\n    "command": "%s -c -D_POSIX_C_SOURCE=200809L -I%s/include -I%s/src -I%s/tool -I%s/../libappend89/include -I%s/../libchecksum89/include -o /dev/null %s",\n    "file": "%s"\n  }\n' \
         "$sep" "$root" "$cc" "$root" "$root" "$root" "$root" "$root" "$f" "$f" >> "$out"
     sep=","
 done

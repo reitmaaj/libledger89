@@ -1,4 +1,4 @@
-/* ledger89.c - two-file append-only ledger over libappend89 + libcksum89.
+/* ledger89.c - two-file append-only ledger over libappend89 + libchecksum89.
  *
  * DATA carries raw payload; INDEX carries fixed 32-byte descriptors. The INDEX
  * writer lock is the ledger-wide writer lock. The public API is record-based.
@@ -53,11 +53,12 @@ static size_t ledger89_priv_chunk_size(size_t left)
     return left;
 }
 
-static unsigned long long ledger89_priv_crc_final(cksum89_crc64_nvme_ctx *ctx)
+static unsigned long long
+ledger89_priv_crc_final(checksum89_crc64_nvme_ctx *ctx)
 {
-    cksum89_u64 value;
+    checksum89_u64 value;
 
-    value = cksum89_crc64_nvme_final(ctx);
+    value = checksum89_crc64_nvme_final(ctx);
     return ((unsigned long long)value.hi << 32) | (unsigned long long)value.lo;
 }
 
@@ -497,7 +498,7 @@ int ledger89_priv_read_entry(append89 *index_r, off_t *pos,
 }
 
 static int ledger89_priv_crc_step(append89 *data_r, off_t *pos, off_t *left,
-                                  cksum89_crc64_nvme_ctx *ctx)
+                                  checksum89_crc64_nvme_ctx *ctx)
 {
     unsigned char buf[LEDGER89_PRIV_CHUNK];
     size_t want;
@@ -514,7 +515,7 @@ static int ledger89_priv_crc_step(append89 *data_r, off_t *pos, off_t *left,
         ledger89_priv_error(EILSEQ);
         return -1;
     }
-    cksum89_crc64_nvme_update(ctx, buf, (size_t)n);
+    checksum89_crc64_nvme_update(ctx, buf, (size_t)n);
     *left = *left - n;
     return 0;
 }
@@ -524,10 +525,10 @@ int ledger89_priv_extent_crc(append89 *data_r, off_t offset, off_t length,
 {
     off_t pos;
     off_t left;
-    cksum89_crc64_nvme_ctx ctx;
+    checksum89_crc64_nvme_ctx ctx;
     int rc;
 
-    cksum89_crc64_nvme_init(&ctx);
+    checksum89_crc64_nvme_init(&ctx);
     pos = offset;
     left = length;
     while (left > 0)
@@ -912,7 +913,8 @@ static void ledger89_priv_copy_out(unsigned char *data, size_t copied,
 
 static int ledger89_priv_read_step(ledger89 *l, off_t *pos, off_t *left,
                                    unsigned char *data, size_t size,
-                                   size_t *copied, cksum89_crc64_nvme_ctx *ctx)
+                                   size_t *copied,
+                                   checksum89_crc64_nvme_ctx *ctx)
 {
     unsigned char buf[LEDGER89_PRIV_CHUNK];
     size_t want;
@@ -929,7 +931,7 @@ static int ledger89_priv_read_step(ledger89 *l, off_t *pos, off_t *left,
         ledger89_priv_error(EILSEQ);
         return -1;
     }
-    cksum89_crc64_nvme_update(ctx, buf, (size_t)got);
+    checksum89_crc64_nvme_update(ctx, buf, (size_t)got);
     if (*copied < size)
     {
         ledger89_priv_copy_out(data, *copied, size, buf, (size_t)got, copied);
@@ -947,7 +949,7 @@ ssize_t ledger89_read(ledger89 *l, unsigned long long n, void *data,
     off_t off;
     off_t len;
     size_t copied;
-    cksum89_crc64_nvme_ctx ctx;
+    checksum89_crc64_nvme_ctx ctx;
     unsigned long long crc;
     int rc;
 
@@ -990,7 +992,7 @@ ssize_t ledger89_read(ledger89 *l, unsigned long long n, void *data,
         ledger89_priv_error(EILSEQ);
         return (ssize_t)-1;
     }
-    cksum89_crc64_nvme_init(&ctx);
+    checksum89_crc64_nvme_init(&ctx);
     pos = off;
     left = len;
     copied = 0U;
@@ -1110,7 +1112,7 @@ int ledger89_iter_next(ledger89_iter *it)
     it->read_pos = off;
     it->read_left = len;
     it->checksum = e.checksum;
-    cksum89_crc64_nvme_init(&it->crc);
+    checksum89_crc64_nvme_init(&it->crc);
     it->expected = off + len;
     it->positioned = 1;
     ++it->next_index;
@@ -1206,7 +1208,7 @@ ssize_t ledger89_iter_read(ledger89_iter *it, void *data, size_t size)
         ledger89_priv_error(EILSEQ);
         return (ssize_t)-1;
     }
-    cksum89_crc64_nvme_update(&it->crc, data, (size_t)n);
+    checksum89_crc64_nvme_update(&it->crc, data, (size_t)n);
     it->read_pos = pos;
     it->read_left -= n;
     if (it->read_left == 0)

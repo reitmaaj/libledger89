@@ -1,7 +1,7 @@
 # Two-file libledger89
 
 Strict C89 syntax; POSIX file API via libappend89; dependencies libappend89 and
-libcksum89. A durable append-only sequence of opaque byte records in two
+libchecksum89. A durable append-only sequence of opaque byte records in two
 libappend89 byte streams: `DATA` (raw payloads) and `INDEX` (fixed 32-byte
 big-endian descriptors with CRC-64/NVME checksums).
 

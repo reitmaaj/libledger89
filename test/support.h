@@ -12,7 +12,7 @@
 #include <unistd.h>
 #include "ledger89.h"
 #include "append89.h"
-#include "cksum89.h"
+#include "checksum89.h"
 #include "fault.h"
 
 #define LEDGER89_TEST_ENTRY_SIZE 32U
@@ -43,8 +43,8 @@ static unsigned long long test_u64_load_be(const unsigned char in[8])
 
 static unsigned long long test_crc(const void *data, size_t size)
 {
-    cksum89_u64 value;
-    value = cksum89_crc64_nvme(data, size);
+    checksum89_u64 value;
+    value = checksum89_crc64_nvme(data, size);
     return ((unsigned long long)value.hi << 32) | (unsigned long long)value.lo;
 }
 

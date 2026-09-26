@@ -111,9 +111,9 @@ static void off_conversion(void)
 static void crc_deterministic(void)
 {
     unsigned long long crc;
-    cksum89_u64 value;
+    checksum89_u64 value;
     crc = ledger89_priv_crc_data("123456789", 9U);
-    value = cksum89_crc64_nvme("123456789", 9U);
+    value = checksum89_crc64_nvme("123456789", 9U);
     assert(crc == (((unsigned long long)value.hi << 32) |
                    (unsigned long long)value.lo));
     assert(ledger89_priv_crc_data(NULL, 0U) ==

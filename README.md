@@ -17,8 +17,8 @@ just sanitize        # ASan + UBSan
 just check           # test + api-convention
 ```
 
-Link in order: `libledger89.a libappend89.a libcksum89.a`. Public includes need
-`libledger89/include`, `libappend89/include`, and `libcksum89/include`.
+Link in order: `libledger89.a libappend89.a libchecksum89.a`. Public includes need
+`libledger89/include`, `libappend89/include`, and `libchecksum89/include`.
 
 Minimal lifecycle:
 

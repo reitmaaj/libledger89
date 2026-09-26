@@ -34,4 +34,4 @@ safety, DATA bounds, and payload checksums, then truncates any invalid INDEX
 suffix and uncommitted DATA tail.
 
 Dependencies: `libappend89` (serialized appends, concurrent reads, shrink
-truncation, durability, locking) and `libcksum89` (CRC-64/NVME).
+truncation, durability, locking) and `libchecksum89` (CRC-64/NVME).

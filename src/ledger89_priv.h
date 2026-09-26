@@ -14,7 +14,7 @@
 #include <stdlib.h>
 
 #include "append89.h"
-#include "cksum89.h"
+#include "checksum89.h"
 #include "ledger89.h"
 #include "ledger89_u64.h"
 
@@ -47,7 +47,7 @@ struct ledger89_iter
     off_t read_pos;                /* absolute DATA offset of next byte */
     off_t read_left;               /* bytes remaining in the current record */
     unsigned long long checksum;   /* expected checksum of the current record */
-    cksum89_crc64_nvme_ctx crc;    /* running checksum of the current record */
+    checksum89_crc64_nvme_ctx crc;    /* running checksum of the current record */
     int positioned;                /* 1 when the iterator is on a record */
 };
 

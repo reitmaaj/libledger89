@@ -11,7 +11,7 @@ logical order, and commit state; the `DATA` file alone does not.
 
 `libledger89` depends on `libappend89` (serialized suffix appends, concurrent
 positional reads, shrink truncation, explicit durability, whole-file writer
-locking) and `libcksum89` (CRC-64/NVME payload checksums). Writers are
+locking) and `libchecksum89` (CRC-64/NVME payload checksums). Writers are
 serialized with one ledger-wide exclusive lock covering both files.
 
 ## 2. Files
