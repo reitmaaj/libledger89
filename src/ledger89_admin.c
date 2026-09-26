@@ -26,24 +26,23 @@ static int ledger89_admin_priv_fail_close(ledger89 *l)
 static int ledger89_admin_priv_inspect(ledger89 *l,
                                        ledger89_admin_report *report)
 {
-    off_t data_size;
+    off_t size;
     off_t valid;
     off_t committed_end;
-    int tail;
     int rc;
 
-    rc = append89_begin(l->data_w, &data_size);
+    rc = append89_begin(l->w, &size);
     if (rc != 0)
     {
         return -1;
     }
-    rc = append89_end(l->data_w);
+    rc = append89_end(l->w);
     if (rc != 0)
     {
         rc = ledger89_admin_priv_poison_fail(l);
         return rc;
     }
-    rc = ledger89_priv_validate(l, &valid, &committed_end, &tail);
+    rc = ledger89_priv_validate(l, &valid, &committed_end);
     if (rc != 0)
     {
         return -1;
@@ -51,11 +50,7 @@ static int ledger89_admin_priv_inspect(ledger89 *l,
     report->valid_end = committed_end;
     report->records = (unsigned long long)valid;
     report->incomplete_tail = 0;
-    if (tail)
-    {
-        report->incomplete_tail = 1;
-    }
-    else if (committed_end != data_size)
+    if (committed_end != size)
     {
         report->incomplete_tail = 1;
     }

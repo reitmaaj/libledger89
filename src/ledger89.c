@@ -1,7 +1,11 @@
-/* ledger89.c - two-file append-only ledger over libappend89 + libchecksum89.
+/* ledger89.c - single-file append-only ledger over libappend89 +
+ * libchecksum89.
  *
- * DATA carries raw payload; INDEX carries fixed 32-byte descriptors. The INDEX
- * writer lock is the ledger-wide writer lock. The public API is record-based.
+ * One stream carries a 16-byte preamble followed by self-framed records
+ * [size u64 BE][crc u64 BE][payload]. The stream's writer lock is the
+ * ledger-wide writer lock. The reserve protocol publishes whole frames, so
+ * the committed end is the logical size reported by append89_begin: O(1),
+ * no scan. The public API is record-based and sequential.
  */
 
 #include <errno.h>
@@ -12,7 +16,9 @@
 
 #include "ledger89_priv.h"
 
-#define LEDGER89_PRIV_CHUNK 4096U
+/* The empty GREEN_PURE annotation lets green treat a following genuinely pure
+ * helper as pure, so call sites may use it in expression position. */
+#define GREEN_PURE
 
 int ledger89_priv_error(int err)
 {
@@ -44,15 +50,6 @@ static size_t ledger89_priv_take_size(size_t got, size_t room)
     return room;
 }
 
-static size_t ledger89_priv_chunk_size(size_t left)
-{
-    if (left > (size_t)APPEND89_RESERVE)
-    {
-        return (size_t)APPEND89_RESERVE;
-    }
-    return left;
-}
-
 static unsigned long long
 ledger89_priv_crc_final(checksum89_crc64_nvme_ctx *ctx)
 {
@@ -76,7 +73,7 @@ int ledger89_priv_usable(const ledger89 *l, int writable)
     }
     if (writable)
     {
-        if (l->index_w == NULL)
+        if (l->w == NULL)
         {
             ledger89_priv_error(EBADF);
             return -1;
@@ -85,90 +82,54 @@ int ledger89_priv_usable(const ledger89 *l, int writable)
     return 0;
 }
 
-/* ---- path construction ---- */
+/* ---- open / close ---- */
 
-static char *ledger89_priv_suffix(const char *name, const char *suffix)
-{
-    size_t nl;
-    size_t sl;
-    char *path;
-
-    nl = strlen(name);
-    sl = strlen(suffix);
-    if (nl > (size_t)-1 - sl - 1U)
-    {
-        return NULL;
-    }
-    path = (char *)malloc(nl + sl + 1U);
-    if (path == NULL)
-    {
-        return NULL;
-    }
-    memcpy(path, name, nl);
-    memcpy(path + nl, suffix, sl + 1U);
-    return path;
-}
-
-static void ledger89_priv_fail_free_two(char *a, char *b)
-{
-    free(a);
-    free(b);
-    ledger89_priv_error(ENOMEM);
-}
-
-static int ledger89_priv_fail_open(ledger89 *l, char *data_path,
-                                   char *index_path)
+static int ledger89_priv_fail_open(ledger89 *l)
 {
     int saved;
 
     saved = errno;
     ledger89_close(l);
-    free(data_path);
-    free(index_path);
     ledger89_priv_error(saved);
     return -1;
 }
 
-static int ledger89_priv_open_handles(ledger89 *l, const char *data_path,
-                                      const char *index_path, int writable)
+/* Validate the 16-byte preamble of an open stream. Fails EINVAL on a short,
+ * mismatched, or wrong-reserve preamble without modifying the file. */
+static int ledger89_priv_check_preamble(append89 *r)
 {
-    int rc;
+    unsigned char raw[LEDGER89_PRIV_PREAMBLE_SIZE];
+    unsigned long long reserve;
+    size_t capacity;
+    off_t pos;
+    int ok;
+    int got;
 
-    rc = append89_open_reader(&l->data_r, data_path);
-    if (rc != 0)
+    pos = 0;
+    got = ledger89_priv_read_exact(r, &pos, raw, LEDGER89_PRIV_PREAMBLE_SIZE);
+    if (got != 1)
     {
+        ledger89_priv_error(EINVAL);
         return -1;
     }
-    rc = append89_open_reader_reserve(&l->index_r, index_path,
-                                      LEDGER89_PRIV_INDEX_RESERVE);
-    if (rc != 0)
+    ledger89_priv_preamble_decode(raw, &reserve, &ok);
+    if (!ok)
     {
+        ledger89_priv_error(EINVAL);
         return -1;
     }
-    if (writable)
+    capacity = append89_capacity(r);
+    if (reserve != (unsigned long long)capacity)
     {
-        rc = append89_open_writer(&l->data_w, data_path, (mode_t)0);
-        if (rc != 0)
-        {
-            return -1;
-        }
-        rc = append89_open_writer_reserve(&l->index_w, index_path, (mode_t)0,
-                                          LEDGER89_PRIV_INDEX_RESERVE);
-        if (rc != 0)
-        {
-            return -1;
-        }
+        ledger89_priv_error(EINVAL);
+        return -1;
     }
     return 0;
 }
 
-/* ---- open / close ---- */
-
 static int ledger89_priv_open(ledger89 **out, const char *name, int writable)
 {
     ledger89 *l;
-    char *data_path;
-    char *index_path;
     int rc;
 
     if (out == NULL)
@@ -192,33 +153,30 @@ static int ledger89_priv_open(ledger89 **out, const char *name, int writable)
         ledger89_priv_error(EINVAL);
         return -1;
     }
-    data_path = ledger89_priv_suffix(name, ".data");
-    index_path = ledger89_priv_suffix(name, ".index");
-    if (data_path == NULL)
-    {
-        ledger89_priv_fail_free_two(data_path, index_path);
-        return -1;
-    }
-    if (index_path == NULL)
-    {
-        ledger89_priv_fail_free_two(data_path, index_path);
-        return -1;
-    }
     l = (ledger89 *)malloc(sizeof(*l));
     if (l == NULL)
     {
-        ledger89_priv_fail_free_two(data_path, index_path);
+        ledger89_priv_error(ENOMEM);
         return -1;
     }
     memset(l, 0, sizeof(*l));
-    rc = ledger89_priv_open_handles(l, data_path, index_path, writable);
+    rc = append89_open_reader(&l->r, name);
+    if (rc == 0)
+    {
+        rc = ledger89_priv_check_preamble(l->r);
+    }
+    if (rc == 0)
+    {
+        if (writable)
+        {
+            rc = append89_open_writer(&l->w, name, (mode_t)0);
+        }
+    }
     if (rc != 0)
     {
-        rc = ledger89_priv_fail_open(l, data_path, index_path);
+        rc = ledger89_priv_fail_open(l);
         return rc;
     }
-    free(data_path);
-    free(index_path);
     *out = l;
     return 0;
 }
@@ -241,10 +199,8 @@ int ledger89_open_writer(ledger89 **out, const char *name)
 
 static void ledger89_priv_release(ledger89 *l)
 {
-    append89_close(l->data_w);
-    append89_close(l->data_r);
-    append89_close(l->index_w);
-    append89_close(l->index_r);
+    append89_close(l->w);
+    append89_close(l->r);
     free(l);
 }
 
@@ -258,42 +214,28 @@ void ledger89_close(ledger89 *l)
 
 /* ---- create ---- */
 
-static int ledger89_priv_fail_create(char *data_path, char *index_path,
-                                     char *dir)
+static int ledger89_priv_fail_create(char *path, char *dir)
 {
     int saved;
 
     saved = errno;
-    free(data_path);
-    free(index_path);
+    free(path);
     free(dir);
     ledger89_priv_error(saved);
     return -1;
 }
 
-static int ledger89_priv_fail_create_dir(char *tmp_data, char *tmp_index,
-                                         char *data_path, char *index_path,
-                                         char *dir)
+static int ledger89_priv_fail_create_dir(char *tmp, char *path, char *dir)
 {
     int saved;
 
     saved = errno;
     (void)rmdir(dir);
-    free(tmp_data);
-    free(tmp_index);
-    free(data_path);
-    free(index_path);
+    free(tmp);
+    free(path);
     free(dir);
     ledger89_priv_error(saved);
     return -1;
-}
-
-static void ledger89_priv_fail_free_three(char *a, char *b, char *c)
-{
-    free(a);
-    free(b);
-    free(c);
-    ledger89_priv_error(ENOMEM);
 }
 
 static size_t ledger89_priv_prefix_len(const char *slash, const char *name)
@@ -305,68 +247,39 @@ static size_t ledger89_priv_prefix_len(const char *slash, const char *name)
     return (size_t)(slash - name) + 1U;
 }
 
-static int ledger89_priv_create_file(const char *path, mode_t mode,
-                                     size_t reserve, int use_reserve)
+/* Write and synchronize the preamble into a freshly created stream. */
+static int ledger89_priv_write_preamble(append89 *w)
 {
-    append89 *w;
+    unsigned char raw[LEDGER89_PRIV_PREAMBLE_SIZE];
+    size_t capacity;
     int rc;
 
-    w = NULL;
-    if (use_reserve)
+    capacity = append89_capacity(w);
+    ledger89_priv_preamble_encode(raw, (unsigned long long)capacity);
+    rc = append89_append(w, raw, LEDGER89_PRIV_PREAMBLE_SIZE, NULL);
+    if (rc != 0)
     {
-        rc = append89_open_writer_reserve(&w, path, mode, reserve);
+        return -1;
     }
-    else
+    rc = append89_sync(w);
+    if (rc != 0)
     {
-        rc = append89_open_writer(&w, path, mode);
+        return -1;
     }
-    if (rc == 0)
-    {
-        append89_close(w);
-    }
-    return rc;
-}
-
-static int ledger89_priv_create_files(mode_t mode, const char *tmp_data,
-                                      const char *tmp_index,
-                                      const char *data_path,
-                                      const char *index_path)
-{
-    int rc;
-
-    rc = ledger89_priv_create_file(tmp_data, mode, 0U, 0);
-    if (rc == 0)
-    {
-        rc = ledger89_priv_create_file(tmp_index, mode,
-                                       LEDGER89_PRIV_INDEX_RESERVE, 1);
-    }
-    if (rc == 0)
-    {
-        rc = link(tmp_data, data_path);
-    }
-    if (rc == 0)
-    {
-        rc = link(tmp_index, index_path);
-        if (rc != 0)
-        {
-            unlink(data_path);
-        }
-    }
-    return rc;
+    return 0;
 }
 
 int ledger89_create(const char *name, mode_t mode)
 {
-    char *data_path;
-    char *index_path;
+    char *path;
     char *dir;
-    char *tmp_data;
-    char *tmp_index;
+    char *tmp;
     char *made;
     const char *slash;
     size_t nl;
     size_t prefix;
     size_t dirlen;
+    append89 *w;
     int rc;
     int saved;
 
@@ -391,24 +304,19 @@ int ledger89_create(const char *name, mode_t mode)
         ledger89_priv_error(ENAMETOOLONG);
         return -1;
     }
-    data_path = ledger89_priv_suffix(name, ".data");
-    index_path = ledger89_priv_suffix(name, ".index");
+    path = (char *)malloc(nl + 1U);
     dir = (char *)malloc(nl + 40U);
-    if (data_path == NULL)
+    if (path == NULL)
     {
-        ledger89_priv_fail_free_three(data_path, index_path, dir);
-        return -1;
-    }
-    if (index_path == NULL)
-    {
-        ledger89_priv_fail_free_three(data_path, index_path, dir);
+        ledger89_priv_fail_create(path, dir);
         return -1;
     }
     if (dir == NULL)
     {
-        ledger89_priv_fail_free_three(data_path, index_path, dir);
+        ledger89_priv_fail_create(path, dir);
         return -1;
     }
+    memcpy(path, name, nl + 1U);
     slash = strrchr(name, '/');
     prefix = ledger89_priv_prefix_len(slash, name);
     memcpy(dir, name, prefix);
@@ -416,38 +324,34 @@ int ledger89_create(const char *name, mode_t mode)
     made = mkdtemp(dir);
     if (made == NULL)
     {
-        rc = ledger89_priv_fail_create(data_path, index_path, dir);
+        rc = ledger89_priv_fail_create(path, dir);
         return rc;
     }
     dirlen = strlen(dir);
-    tmp_data = (char *)malloc(dirlen + 16U);
-    tmp_index = (char *)malloc(dirlen + 16U);
-    if (tmp_data == NULL)
+    tmp = (char *)malloc(dirlen + 16U);
+    if (tmp == NULL)
     {
-        rc = ledger89_priv_fail_create_dir(tmp_data, tmp_index, data_path,
-                                           index_path, dir);
+        rc = ledger89_priv_fail_create_dir(tmp, path, dir);
         return rc;
     }
-    if (tmp_index == NULL)
+    strcpy(tmp, dir);
+    strcat(tmp, "/ledger");
+    w = NULL;
+    rc = append89_open_writer(&w, tmp, mode);
+    if (rc == 0)
     {
-        rc = ledger89_priv_fail_create_dir(tmp_data, tmp_index, data_path,
-                                           index_path, dir);
-        return rc;
+        rc = ledger89_priv_write_preamble(w);
     }
-    strcpy(tmp_data, dir);
-    strcat(tmp_data, "/data");
-    strcpy(tmp_index, dir);
-    strcat(tmp_index, "/index");
-    rc = ledger89_priv_create_files(mode, tmp_data, tmp_index, data_path,
-                                    index_path);
+    append89_close(w);
+    if (rc == 0)
+    {
+        rc = link(tmp, path);
+    }
     saved = errno;
-    (void)unlink(tmp_data);
-    (void)unlink(tmp_index);
+    (void)unlink(tmp);
     (void)rmdir(dir);
-    free(tmp_data);
-    free(tmp_index);
-    free(data_path);
-    free(index_path);
+    free(tmp);
+    free(path);
     free(dir);
     errno = saved;
     return rc;
@@ -455,49 +359,36 @@ int ledger89_create(const char *name, mode_t mode)
 
 /* ---- shared I/O helpers ---- */
 
-static int
-ledger89_priv_read_entry_chunk(append89 *index_r, off_t *pos,
-                               unsigned char out[LEDGER89_PRIV_ENTRY_SIZE],
-                               size_t *got)
+GREEN_PURE
+static size_t ledger89_priv_grow_got(size_t got, ssize_t n)
 {
+    return got + (size_t)n;
+}
+
+int ledger89_priv_read_exact(append89 *r, off_t *pos, unsigned char *out,
+                             size_t want)
+{
+    size_t got;
     ssize_t n;
 
-    n = append89_read(index_r, pos, out + *got,
-                      LEDGER89_PRIV_ENTRY_SIZE - *got);
-    if (n < 0)
+    got = 0U;
+    while (got < want)
     {
-        return -1;
+        n = append89_read(r, pos, out + got, want - got);
+        if (n < 0)
+        {
+            return -1;
+        }
+        if (n == 0)
+        {
+            return 0;
+        }
+        got = ledger89_priv_grow_got(got, n);
     }
-    if (n == 0)
-    {
-        return 0;
-    }
-    *got = *got + (size_t)n;
     return 1;
 }
 
-int ledger89_priv_read_entry(append89 *index_r, off_t *pos,
-                             unsigned char out[LEDGER89_PRIV_ENTRY_SIZE],
-                             int *complete)
-{
-    size_t got;
-    int rc;
-
-    got = 0U;
-    *complete = 0;
-    while (got < LEDGER89_PRIV_ENTRY_SIZE)
-    {
-        rc = ledger89_priv_read_entry_chunk(index_r, pos, out, &got);
-        if (rc <= 0)
-        {
-            return rc;
-        }
-    }
-    *complete = 1;
-    return 0;
-}
-
-static int ledger89_priv_crc_step(append89 *data_r, off_t *pos, off_t *left,
+static int ledger89_priv_crc_step(append89 *r, off_t *pos, off_t *left,
                                   checksum89_crc64_nvme_ctx *ctx)
 {
     unsigned char buf[LEDGER89_PRIV_CHUNK];
@@ -505,7 +396,7 @@ static int ledger89_priv_crc_step(append89 *data_r, off_t *pos, off_t *left,
     ssize_t n;
 
     want = ledger89_priv_want_size(*left, sizeof(buf));
-    n = append89_read(data_r, pos, buf, want);
+    n = append89_read(r, pos, buf, want);
     if (n < 0)
     {
         return -1;
@@ -520,7 +411,7 @@ static int ledger89_priv_crc_step(append89 *data_r, off_t *pos, off_t *left,
     return 0;
 }
 
-int ledger89_priv_extent_crc(append89 *data_r, off_t offset, off_t length,
+int ledger89_priv_extent_crc(append89 *r, off_t offset, off_t length,
                              unsigned long long *crc)
 {
     off_t pos;
@@ -533,7 +424,7 @@ int ledger89_priv_extent_crc(append89 *data_r, off_t offset, off_t length,
     left = length;
     while (left > 0)
     {
-        rc = ledger89_priv_crc_step(data_r, &pos, &left, &ctx);
+        rc = ledger89_priv_crc_step(r, &pos, &left, &ctx);
         if (rc != 0)
         {
             return -1;
@@ -551,7 +442,7 @@ static int ledger89_priv_finish(ledger89 *l, int rc)
     int end_rc;
 
     saved = errno;
-    end_rc = append89_end(l->index_w);
+    end_rc = append89_end(l->w);
     if (end_rc != 0)
     {
         ledger89_priv_poison(l);
@@ -561,118 +452,37 @@ static int ledger89_priv_finish(ledger89 *l, int rc)
     return rc;
 }
 
-/* Committed end derived from the last complete INDEX entry. */
-static int ledger89_priv_frontier(ledger89 *l, off_t index_size,
-                                  off_t *committed)
+/* Build the frame header || payload in one contiguous buffer and publish it
+ * as one candidate, then sync. The writer lock is already held and committed
+ * equals the logical size. The buffer copy is the cast-free way to submit one
+ * candidate without discarding the payload's const qualifier. */
+static int ledger89_priv_append_frame(ledger89 *l, const void *data,
+                                      size_t size)
 {
-    unsigned char raw[LEDGER89_PRIV_ENTRY_SIZE];
-    struct ledger89_priv_entry e;
-    unsigned long long end;
-    off_t pos;
-    int header_ok;
-    int complete;
+    struct ledger89_priv_header h;
+    unsigned char *frame;
     int rc;
 
-    if (index_size < (off_t)LEDGER89_PRIV_ENTRY_SIZE)
+    frame = (unsigned char *)malloc(LEDGER89_PRIV_HEADER_SIZE + size);
+    if (frame == NULL)
     {
-        *committed = 0;
-        return 0;
-    }
-    pos = (index_size / (off_t)LEDGER89_PRIV_ENTRY_SIZE - 1) *
-          (off_t)LEDGER89_PRIV_ENTRY_SIZE;
-    rc = ledger89_priv_read_entry(l->index_r, &pos, raw, &complete);
-    if (rc != 0)
-    {
-        ledger89_priv_error(EILSEQ);
+        ledger89_priv_error(ENOMEM);
         return -1;
     }
-    if (!complete)
+    h.size = (unsigned long long)size;
+    h.checksum = ledger89_priv_crc_data(data, size);
+    ledger89_priv_header_encode(frame, &h);
+    if (size > 0U)
     {
-        ledger89_priv_error(EILSEQ);
-        return -1;
+        memcpy(frame + LEDGER89_PRIV_HEADER_SIZE, data, size);
     }
-    ledger89_priv_entry_decode(raw, &e, &header_ok);
-    if (!header_ok)
-    {
-        ledger89_priv_error(EILSEQ);
-        return -1;
-    }
-    end = e.offset + e.length;
-    rc = ledger89_u64_to_off(end, committed);
-    if (rc != 0)
-    {
-        ledger89_priv_error(EILSEQ);
-        return -1;
-    }
-    return 0;
-}
-
-static int ledger89_priv_append_chunk(append89 *data_w, const unsigned char **p,
-                                      size_t *left)
-{
-    size_t chunk;
-    int rc;
-
-    chunk = ledger89_priv_chunk_size(*left);
-    rc = append89_append(data_w, *p, chunk, NULL);
+    rc = append89_append(l->w, frame, LEDGER89_PRIV_HEADER_SIZE + size, NULL);
+    free(frame);
     if (rc != 0)
     {
         return -1;
     }
-    *p = *p + chunk;
-    *left = *left - chunk;
-    return 0;
-}
-
-static int ledger89_priv_append_all(append89 *data_w, const void *data,
-                                    size_t size)
-{
-    const unsigned char *p;
-    size_t left;
-    int rc;
-
-    p = (const unsigned char *)data;
-    left = size;
-    while (left > 0U)
-    {
-        rc = ledger89_priv_append_chunk(data_w, &p, &left);
-        if (rc != 0)
-        {
-            return -1;
-        }
-    }
-    return 0;
-}
-
-/* Append payload, sync DATA, publish the INDEX entry, sync INDEX. Assumes the
- * INDEX lock is held and committed == size(DATA). */
-static int ledger89_priv_append_payload(ledger89 *l, const void *data,
-                                        size_t size, off_t committed)
-{
-    unsigned char raw[LEDGER89_PRIV_ENTRY_SIZE];
-    struct ledger89_priv_entry entry;
-    int rc;
-
-    rc = ledger89_priv_append_all(l->data_w, data, size);
-    if (rc != 0)
-    {
-        return -1;
-    }
-    rc = append89_sync(l->data_w);
-    if (rc != 0)
-    {
-        return -1;
-    }
-    entry.offset = ledger89_u64_from_off(committed);
-    entry.length = (unsigned long long)size;
-    entry.checksum = ledger89_priv_crc_data(data, size);
-    ledger89_priv_entry_encode(raw, &entry);
-    rc = append89_append(l->index_w, raw, LEDGER89_PRIV_ENTRY_SIZE, NULL);
-    if (rc != 0)
-    {
-        return -1;
-    }
-    rc = append89_sync(l->index_w);
+    rc = append89_sync(l->w);
     if (rc != 0)
     {
         return -1;
@@ -680,64 +490,28 @@ static int ledger89_priv_append_payload(ledger89 *l, const void *data,
     return 0;
 }
 
-/* Ensure DATA is aligned with the INDEX frontier, recovering when needed. */
-static int ledger89_priv_align_data(ledger89 *l, off_t index_size,
-                                    off_t *committed)
+/* The payload offset of a record whose frame starts at the committed end. */
+GREEN_PURE
+static ledger89_offset ledger89_priv_payload_off(off_t end)
 {
-    off_t data_size;
-    off_t before;
-    off_t after;
-    int rc;
-
-    rc = append89_begin(l->data_w, &data_size);
-    if (rc != 0)
-    {
-        return rc;
-    }
-    if (data_size != *committed)
-    {
-        rc = append89_end(l->data_w);
-        if (rc != 0)
-        {
-            ledger89_priv_poison(l);
-            return -1;
-        }
-        rc = ledger89_priv_recover_core(l, index_size, &before, &after);
-        if (rc != 0)
-        {
-            return -1;
-        }
-        *committed = after;
-        return 0;
-    }
-    rc = append89_end(l->data_w);
-    if (rc != 0)
-    {
-        ledger89_priv_poison(l);
-        return -1;
-    }
-    return 0;
+    return end + (off_t)LEDGER89_PRIV_HEADER_SIZE;
 }
 
-static int ledger89_priv_check_room(off_t committed, off_t len)
+/* Report EOVERFLOW and release the held writer session. */
+static int ledger89_priv_end_overflow(ledger89 *l)
 {
-    unsigned long long room;
+    int rc;
 
-    room = ledger89_u64_off_max() - (unsigned long long)len;
-    if (committed > (off_t)room)
-    {
-        ledger89_priv_error(EOVERFLOW);
-        return -1;
-    }
-    return 0;
+    rc = ledger89_priv_error(EOVERFLOW);
+    rc = ledger89_priv_finish(l, rc);
+    return rc;
 }
 
 int ledger89_append(ledger89 *l, const void *data, size_t size,
                     ledger89_offset *offset)
 {
-    off_t index_size;
-    off_t committed;
-    off_t len;
+    off_t end;
+    size_t capacity;
     int rc;
 
     rc = ledger89_priv_usable(l, 1);
@@ -753,265 +527,38 @@ int ledger89_append(ledger89 *l, const void *data, size_t size,
             return -1;
         }
     }
-    rc = ledger89_u64_to_off((unsigned long long)size, &len);
-    if (rc != 0)
+    capacity = append89_capacity(l->w);
+    if (capacity < LEDGER89_PRIV_HEADER_SIZE)
     {
-        ledger89_priv_error(EOVERFLOW);
+        ledger89_priv_error(EINVAL);
         return -1;
     }
-    rc = append89_begin(l->index_w, &index_size);
+    if (size > capacity - LEDGER89_PRIV_HEADER_SIZE)
+    {
+        ledger89_priv_error(E2BIG);
+        return -1;
+    }
+    rc = append89_begin(l->w, &end);
     if (rc != 0)
     {
         return -1;
     }
-    rc = ledger89_priv_frontier(l, index_size, &committed);
-    if (rc == 0)
+    if (end > (off_t)(ledger89_u64_off_max() -
+                      (unsigned long long)LEDGER89_PRIV_HEADER_SIZE))
     {
-        rc = ledger89_priv_align_data(l, index_size, &committed);
+        rc = ledger89_priv_end_overflow(l);
+        return rc;
     }
-    if (rc == 0)
-    {
-        rc = ledger89_priv_check_room(committed, len);
-    }
-    if (rc == 0)
-    {
-        rc = ledger89_priv_append_payload(l, data, size, committed);
-    }
+    rc = ledger89_priv_append_frame(l, data, size);
     rc = ledger89_priv_finish(l, rc);
     if (rc == 0)
     {
         if (offset != NULL)
         {
-            *offset = committed;
+            *offset = ledger89_priv_payload_off(end);
         }
     }
     return rc;
-}
-
-/* ---- reader: count / length / offset / read ---- */
-
-int ledger89_count(ledger89 *l, unsigned long long *count)
-{
-    unsigned char raw[LEDGER89_PRIV_ENTRY_SIZE];
-    off_t pos;
-    int complete;
-    int rc;
-
-    rc = ledger89_priv_usable(l, 0);
-    if (rc != 0)
-    {
-        return -1;
-    }
-    if (count == NULL)
-    {
-        ledger89_priv_error(EINVAL);
-        return -1;
-    }
-    *count = 0ULL;
-    pos = 0;
-    for (;;)
-    {
-        rc = ledger89_priv_read_entry(l->index_r, &pos, raw, &complete);
-        if (rc != 0)
-        {
-            return -1;
-        }
-        if (!complete)
-        {
-            break;
-        }
-        ++*count;
-    }
-    return 0;
-}
-
-/* Read and header-validate entry n. Returns 1 with e filled when present and
- * header-valid, 0 when out of range or header-invalid, -1 on I/O error. */
-static int ledger89_priv_entry_at(ledger89 *l, unsigned long long n,
-                                  struct ledger89_priv_entry *e)
-{
-    unsigned char raw[LEDGER89_PRIV_ENTRY_SIZE];
-    off_t pos;
-    int header_ok;
-    int complete;
-    int rc;
-
-    if (n > ledger89_u64_off_max() / LEDGER89_PRIV_ENTRY_SIZE)
-    {
-        return 0;
-    }
-    pos = (off_t)n * (off_t)LEDGER89_PRIV_ENTRY_SIZE;
-    rc = ledger89_priv_read_entry(l->index_r, &pos, raw, &complete);
-    if (rc != 0)
-    {
-        return -1;
-    }
-    if (!complete)
-    {
-        return 0;
-    }
-    ledger89_priv_entry_decode(raw, e, &header_ok);
-    if (header_ok)
-    {
-        return 1;
-    }
-    return 0;
-}
-
-unsigned long long ledger89_length(ledger89 *l, unsigned long long n)
-{
-    struct ledger89_priv_entry e;
-    int rc;
-
-    if (l == NULL)
-    {
-        return 0ULL;
-    }
-    rc = ledger89_priv_entry_at(l, n, &e);
-    if (rc <= 0)
-    {
-        return 0ULL;
-    }
-    return e.length;
-}
-
-ledger89_offset ledger89_offset_of(ledger89 *l, unsigned long long n)
-{
-    struct ledger89_priv_entry e;
-    off_t off;
-    int rc;
-
-    if (l == NULL)
-    {
-        return (ledger89_offset)-1;
-    }
-    rc = ledger89_priv_entry_at(l, n, &e);
-    if (rc <= 0)
-    {
-        return (ledger89_offset)-1;
-    }
-    rc = ledger89_u64_to_off(e.offset, &off);
-    if (rc != 0)
-    {
-        return (ledger89_offset)-1;
-    }
-    return off;
-}
-
-static void ledger89_priv_copy_out(unsigned char *data, size_t copied,
-                                   size_t size, const unsigned char *buf,
-                                   size_t got, size_t *copied_out)
-{
-    size_t room;
-    size_t take;
-
-    room = size - copied;
-    take = ledger89_priv_take_size(got, room);
-    memcpy(data + copied, buf, take);
-    *copied_out = copied + take;
-}
-
-static int ledger89_priv_read_step(ledger89 *l, off_t *pos, off_t *left,
-                                   unsigned char *data, size_t size,
-                                   size_t *copied,
-                                   checksum89_crc64_nvme_ctx *ctx)
-{
-    unsigned char buf[LEDGER89_PRIV_CHUNK];
-    size_t want;
-    ssize_t got;
-
-    want = ledger89_priv_want_size(*left, sizeof(buf));
-    got = append89_read(l->data_r, pos, buf, want);
-    if (got < 0)
-    {
-        return -1;
-    }
-    if (got == 0)
-    {
-        ledger89_priv_error(EILSEQ);
-        return -1;
-    }
-    checksum89_crc64_nvme_update(ctx, buf, (size_t)got);
-    if (*copied < size)
-    {
-        ledger89_priv_copy_out(data, *copied, size, buf, (size_t)got, copied);
-    }
-    *left = *left - got;
-    return 0;
-}
-
-ssize_t ledger89_read(ledger89 *l, unsigned long long n, void *data,
-                      size_t size)
-{
-    struct ledger89_priv_entry e;
-    off_t pos;
-    off_t left;
-    off_t off;
-    off_t len;
-    size_t copied;
-    checksum89_crc64_nvme_ctx ctx;
-    unsigned long long crc;
-    int rc;
-
-    rc = ledger89_priv_usable(l, 0);
-    if (rc != 0)
-    {
-        return -1;
-    }
-    if (size > 0U)
-    {
-        if (data == NULL)
-        {
-            ledger89_priv_error(EINVAL);
-            return (ssize_t)-1;
-        }
-    }
-    rc = ledger89_priv_entry_at(l, n, &e);
-    if (rc <= 0)
-    {
-        return 0;
-    }
-    rc = ledger89_u64_to_off(e.offset, &off);
-    if (rc != 0)
-    {
-        ledger89_priv_error(EILSEQ);
-        return (ssize_t)-1;
-    }
-    rc = ledger89_u64_to_off(e.length, &len);
-    if (rc != 0)
-    {
-        ledger89_priv_error(EILSEQ);
-        return (ssize_t)-1;
-    }
-    if (len == 0)
-    {
-        return 0;
-    }
-    if (off > (off_t)(ledger89_u64_off_max() - (unsigned long long)len))
-    {
-        ledger89_priv_error(EILSEQ);
-        return (ssize_t)-1;
-    }
-    checksum89_crc64_nvme_init(&ctx);
-    pos = off;
-    left = len;
-    copied = 0U;
-    while (left > 0)
-    {
-        rc = ledger89_priv_read_step(l, &pos, &left, (unsigned char *)data,
-                                     size, &copied, &ctx);
-        if (rc != 0)
-        {
-            return -1;
-        }
-    }
-    crc = ledger89_priv_crc_final(&ctx);
-    if (crc != e.checksum)
-    {
-        ledger89_priv_error(EILSEQ);
-        return (ssize_t)-1;
-    }
-    return (ssize_t)copied;
 }
 
 /* ---- iteration ---- */
@@ -1040,19 +587,38 @@ int ledger89_iter_begin(ledger89 *l, ledger89_iter **out)
     }
     memset(it, 0, sizeof(*it));
     it->owner = l;
+    it->pos = (off_t)LEDGER89_PRIV_PREAMBLE_SIZE;
     *out = it;
     return LEDGER89_OK;
 }
 
+static int ledger89_priv_frame_fits(off_t frame, off_t len)
+{
+    unsigned long long room;
+
+    room = ledger89_u64_off_max();
+    if ((unsigned long long)len >
+        room - (unsigned long long)LEDGER89_PRIV_HEADER_SIZE)
+    {
+        return 0;
+    }
+    if ((unsigned long long)frame >
+        room - (unsigned long long)len -
+            (unsigned long long)LEDGER89_PRIV_HEADER_SIZE)
+    {
+        return 0;
+    }
+    return 1;
+}
+
 int ledger89_iter_next(ledger89_iter *it)
 {
-    unsigned char raw[LEDGER89_PRIV_ENTRY_SIZE];
-    struct ledger89_priv_entry e;
+    unsigned char raw[LEDGER89_PRIV_HEADER_SIZE];
+    struct ledger89_priv_header h;
     off_t pos;
-    off_t off;
     off_t len;
-    int header_ok;
-    int complete;
+    size_t capacity;
+    int got;
     int rc;
 
     if (it == NULL)
@@ -1065,55 +631,45 @@ int ledger89_iter_next(ledger89_iter *it)
     {
         return -1;
     }
-    if (it->next_index > ledger89_u64_off_max() / LEDGER89_PRIV_ENTRY_SIZE)
+    pos = it->pos;
+    got = ledger89_priv_read_exact(it->owner->r, &pos, raw,
+                                   LEDGER89_PRIV_HEADER_SIZE);
+    if (got != 1)
     {
-        return LEDGER89_END;
-    }
-    pos = (off_t)it->next_index * (off_t)LEDGER89_PRIV_ENTRY_SIZE;
-    rc = ledger89_priv_read_entry(it->owner->index_r, &pos, raw, &complete);
-    if (rc != 0)
-    {
+        if (got == 0)
+        {
+            return LEDGER89_END;
+        }
         return -1;
     }
-    if (!complete)
-    {
-        return LEDGER89_END;
-    }
-    ledger89_priv_entry_decode(raw, &e, &header_ok);
-    if (!header_ok)
-    {
-        ledger89_priv_error(EILSEQ);
-        return -1;
-    }
-    rc = ledger89_u64_to_off(e.offset, &off);
+    ledger89_priv_header_decode(raw, &h);
+    rc = ledger89_u64_to_off(h.size, &len);
     if (rc != 0)
     {
         ledger89_priv_error(EILSEQ);
         return -1;
     }
-    rc = ledger89_u64_to_off(e.length, &len);
-    if (rc != 0)
+    capacity = append89_capacity(it->owner->r);
+    if ((unsigned long long)len +
+            (unsigned long long)LEDGER89_PRIV_HEADER_SIZE >
+        (unsigned long long)capacity)
     {
         ledger89_priv_error(EILSEQ);
         return -1;
     }
-    if (off != it->expected)
+    got = ledger89_priv_frame_fits(it->pos, len);
+    if (got == 0)
     {
         ledger89_priv_error(EILSEQ);
         return -1;
     }
-    if (off > (off_t)(ledger89_u64_off_max() - (unsigned long long)len))
-    {
-        ledger89_priv_error(EILSEQ);
-        return -1;
-    }
-    it->offset = off;
+    it->offset = it->pos + (off_t)LEDGER89_PRIV_HEADER_SIZE;
     it->length = len;
-    it->read_pos = off;
+    it->read_pos = it->offset;
     it->read_left = len;
-    it->checksum = e.checksum;
+    it->checksum = h.checksum;
     checksum89_crc64_nvme_init(&it->crc);
-    it->expected = off + len;
+    it->pos = it->offset + len;
     it->positioned = 1;
     ++it->next_index;
     return LEDGER89_OK;
@@ -1198,7 +754,7 @@ ssize_t ledger89_iter_read(ledger89_iter *it, void *data, size_t size)
     }
     want = ledger89_priv_take_size(size, (size_t)it->read_left);
     pos = it->read_pos;
-    n = append89_read(it->owner->data_r, &pos, data, want);
+    n = append89_read(it->owner->r, &pos, data, want);
     if (n < 0)
     {
         return -1;
@@ -1233,7 +789,7 @@ void ledger89_iter_close(ledger89_iter *it)
 int ledger89_recover(ledger89 *l, ledger89_offset *before,
                      ledger89_offset *after)
 {
-    off_t index_size;
+    off_t size;
     off_t b;
     off_t a;
     int rc;
@@ -1243,12 +799,12 @@ int ledger89_recover(ledger89 *l, ledger89_offset *before,
     {
         return -1;
     }
-    rc = append89_begin(l->index_w, &index_size);
+    rc = append89_begin(l->w, &size);
     if (rc != 0)
     {
         return -1;
     }
-    rc = ledger89_priv_recover_core(l, index_size, &b, &a);
+    rc = ledger89_priv_recover_core(l, size, &b, &a);
     rc = ledger89_priv_finish(l, rc);
     if (rc == 0)
     {

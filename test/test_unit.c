@@ -1,6 +1,6 @@
-/* Layer 1: deterministic unit tests for the INDEX codec, big-endian scalars,
- * and offset arithmetic. Includes the private header to test pure functions
- * directly. */
+/* Layer 1: deterministic unit tests for the preamble and frame header codecs,
+ * big-endian scalars, and offset arithmetic. Includes the private header to
+ * test pure functions directly. */
 #include <assert.h>
 #include <limits.h>
 #include <stddef.h>
@@ -8,80 +8,75 @@
 
 #include "ledger89_priv.h"
 
-static void codec_roundtrip(void)
+static void preamble_roundtrip(void)
+{
+    unsigned char raw[LEDGER89_PRIV_PREAMBLE_SIZE];
+    unsigned long long reserve;
+    int ok;
+    ledger89_priv_preamble_encode(raw, (unsigned long long)APPEND89_RESERVE);
+    ledger89_priv_preamble_decode(raw, &reserve, &ok);
+    assert(ok == 1);
+    assert(reserve == (unsigned long long)APPEND89_RESERVE);
+}
+
+static void preamble_exact_bytes(void)
+{
+    static const unsigned char expected[LEDGER89_PRIV_PREAMBLE_SIZE] = {
+        0x4c, 0x45, 0x44, 0x47, 0x38, 0x39, 0x53, 0x31,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00};
+    unsigned char raw[LEDGER89_PRIV_PREAMBLE_SIZE];
+    ledger89_priv_preamble_encode(raw, (unsigned long long)APPEND89_RESERVE);
+    assert(memcmp(raw, expected, LEDGER89_PRIV_PREAMBLE_SIZE) == 0);
+}
+
+static void preamble_magic_rejection(void)
+{
+    unsigned char raw[LEDGER89_PRIV_PREAMBLE_SIZE];
+    unsigned long long reserve;
+    int ok;
+    ledger89_priv_preamble_encode(raw, (unsigned long long)APPEND89_RESERVE);
+    raw[0] ^= 0x01U;
+    ledger89_priv_preamble_decode(raw, &reserve, &ok);
+    assert(ok == 0);
+}
+
+static void header_roundtrip(void)
 {
     static const struct
     {
-        unsigned long long offset;
-        unsigned long long length;
+        unsigned long long size;
         unsigned long long checksum;
     } cases[] = {
-        {0ULL, 0ULL, 0ULL},
-        {0x0102030405060708ULL, 0x1112131415161718ULL, 0x2122232425262728ULL},
-        {0xffffffffffffffffULL, 0xffffffffffffffffULL, 0xffffffffffffffffULL},
-        {1ULL, 2ULL, 3ULL},
+        {0ULL, 0ULL},
+        {0x0102030405060708ULL, 0x1112131415161718ULL},
+        {0xffffffffffffffffULL, 0xffffffffffffffffULL},
+        {1ULL, 2ULL},
     };
-    unsigned char raw[LEDGER89_PRIV_ENTRY_SIZE];
-    struct ledger89_priv_entry e;
-    int header_ok;
+    unsigned char raw[LEDGER89_PRIV_HEADER_SIZE];
+    struct ledger89_priv_header h;
     size_t i;
     for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i)
     {
-        e.offset = cases[i].offset;
-        e.length = cases[i].length;
-        e.checksum = cases[i].checksum;
-        ledger89_priv_entry_encode(raw, &e);
-        ledger89_priv_entry_decode(raw, &e, &header_ok);
-        assert(header_ok == 1);
-        assert(e.offset == cases[i].offset);
-        assert(e.length == cases[i].length);
-        assert(e.checksum == cases[i].checksum);
+        h.size = cases[i].size;
+        h.checksum = cases[i].checksum;
+        ledger89_priv_header_encode(raw, &h);
+        ledger89_priv_header_decode(raw, &h);
+        assert(h.size == cases[i].size);
+        assert(h.checksum == cases[i].checksum);
     }
 }
 
-static void codec_exact_bytes(void)
+static void header_exact_bytes(void)
 {
-    static const unsigned char expected[LEDGER89_PRIV_ENTRY_SIZE] = {
+    static const unsigned char expected[LEDGER89_PRIV_HEADER_SIZE] = {
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
-        0x4c, 0x44, 0x38, 0x39, 0x00, 0x01, 0x00, 0x00};
-    unsigned char raw[LEDGER89_PRIV_ENTRY_SIZE];
-    struct ledger89_priv_entry e;
-    e.offset = 0x0102030405060708ULL;
-    e.length = 0x1112131415161718ULL;
-    e.checksum = 0x2122232425262728ULL;
-    ledger89_priv_entry_encode(raw, &e);
-    assert(memcmp(raw, expected, LEDGER89_PRIV_ENTRY_SIZE) == 0);
-}
-
-static void codec_header_rejection(void)
-{
-    unsigned char raw[LEDGER89_PRIV_ENTRY_SIZE];
-    struct ledger89_priv_entry e;
-    int header_ok;
-    memset(raw, 0, sizeof(raw));
-    /* A valid entry, then corrupt each header field in turn. */
-    e.offset = 0ULL;
-    e.length = 0ULL;
-    e.checksum = 0ULL;
-    ledger89_priv_entry_encode(raw, &e);
-    ledger89_priv_entry_decode(raw, &e, &header_ok);
-    assert(header_ok == 1);
-
-    raw[24] ^= 0x01U; /* magic */
-    ledger89_priv_entry_decode(raw, &e, &header_ok);
-    assert(header_ok == 0);
-    raw[24] ^= 0x01U;
-
-    raw[29] = 2U; /* version */
-    ledger89_priv_entry_decode(raw, &e, &header_ok);
-    assert(header_ok == 0);
-    raw[29] = 1U;
-
-    raw[31] = 1U; /* flags */
-    ledger89_priv_entry_decode(raw, &e, &header_ok);
-    assert(header_ok == 0);
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+    unsigned char raw[LEDGER89_PRIV_HEADER_SIZE];
+    struct ledger89_priv_header h;
+    h.size = 0x0102030405060708ULL;
+    h.checksum = 0x1112131415161718ULL;
+    ledger89_priv_header_encode(raw, &h);
+    assert(memcmp(raw, expected, LEDGER89_PRIV_HEADER_SIZE) == 0);
 }
 
 static void u64_roundtrip(void)
@@ -122,9 +117,11 @@ static void crc_deterministic(void)
 
 int main(void)
 {
-    codec_roundtrip();
-    codec_exact_bytes();
-    codec_header_rejection();
+    preamble_roundtrip();
+    preamble_exact_bytes();
+    preamble_magic_rejection();
+    header_roundtrip();
+    header_exact_bytes();
     u64_roundtrip();
     off_conversion();
     crc_deterministic();

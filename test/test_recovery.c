@@ -3,36 +3,21 @@
  * result, then verifies recovery is idempotent. */
 #include "support.h"
 
-static void data_path(char *out, size_t size, const char *path)
-{
-    (void)snprintf(out, size, "%s.data", path);
-}
-
-static void index_path(char *out, size_t size, const char *path)
-{
-    (void)snprintf(out, size, "%s.index", path);
-}
-
-/* Recover once, capture file sizes, recover again, and compare sizes. */
+/* Recover once, capture the logical size, recover again, and compare. */
 static void recover_twice(const char *path)
 {
     ledger89 *l;
-    off_t d1;
-    off_t i1;
-    off_t d2;
-    off_t i2;
+    off_t s1;
+    off_t s2;
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
     ledger89_close(l);
-    d1 = test_data_logical_size(path);
-    i1 = test_index_logical_size(path);
+    s1 = test_logical_size(path);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
     ledger89_close(l);
-    d2 = test_data_logical_size(path);
-    i2 = test_index_logical_size(path);
-    assert(d1 == d2);
-    assert(i1 == i2);
+    s2 = test_logical_size(path);
+    assert(s1 == s2);
 }
 
 static void clean_state(void)
@@ -53,72 +38,42 @@ static void clean_state(void)
     test_unlink(path);
 }
 
-static void uncommitted_data_tail(void)
+static void garbage_tail(void)
 {
     char path[160];
-    char data[160];
-    char index[160];
     append89 *w;
     ledger89 *l;
-    unsigned long long count;
-    test_path(path, sizeof(path), "rec-tail", 0);
+    test_path(path, sizeof(path), "rec-garbage", 0);
     assert(ledger89_create(path, (mode_t)0600) == 0);
-    data_path(data, sizeof(data), path);
-    index_path(index, sizeof(index), path);
-    assert(append89_open_writer(&w, data, (mode_t)0) == 0);
-    test_append_data(w, "ABgarbage", 10U);
-    append89_close(w);
-    assert(append89_open_writer_reserve(&w, index, (mode_t)0,
-                                        LEDGER89_TEST_INDEX_RESERVE) == 0);
-    test_append_index(w, 0ULL, 1ULL, test_crc("A", 1U));
-    test_append_index(w, 1ULL, 1ULL, test_crc("B", 1U));
+    assert(ledger89_open_writer(&l, path) == 0);
+    assert(ledger89_append(l, "base", 4U, NULL) == 0);
+    ledger89_close(l);
+    assert(append89_open_writer(&w, path, (mode_t)0) == 0);
+    test_append_bytes(w, "garbage!", 8U);
     append89_close(w);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 2ULL);
+    assert(test_count(l) == 1ULL);
+    test_expect(l, 0ULL, "base", 4U);
     ledger89_close(l);
-    assert(test_data_logical_size(path) == 2);
+    assert(test_logical_size(path) == (off_t)(16 + 16 + 4));
+    recover_twice(path);
     test_unlink(path);
 }
 
-static void data_only(void)
+static void partial_header(int partial)
 {
     char path[160];
-    char data[160];
     append89 *w;
     ledger89 *l;
-    unsigned long long count;
-    test_path(path, sizeof(path), "rec-dataonly", 0);
-    assert(ledger89_create(path, (mode_t)0600) == 0);
-    data_path(data, sizeof(data), path);
-    assert(append89_open_writer(&w, data, (mode_t)0) == 0);
-    test_append_data(w, "arbitrary", 9U);
-    append89_close(w);
-    assert(ledger89_open_writer(&l, path) == 0);
-    assert(ledger89_recover(l, NULL, NULL) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 0ULL);
-    ledger89_close(l);
-    assert(test_data_logical_size(path) == 0);
-    test_unlink(path);
-}
-
-static void partial_index_entry(int partial)
-{
-    char path[160];
-    char index[160];
-    append89 *w;
-    ledger89 *l;
-    unsigned char garbage[31];
-    unsigned long long count;
+    unsigned char garbage[15];
     int i;
     test_path(path, sizeof(path), "rec-partial", partial);
     assert(ledger89_create(path, (mode_t)0600) == 0);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_append(l, "base", 4U, NULL) == 0);
     ledger89_close(l);
-    index_path(index, sizeof(index), path);
-    assert(append89_open_writer_reserve(&w, index, (mode_t)0,
-                                        LEDGER89_TEST_INDEX_RESERVE) == 0);
+    assert(append89_open_writer(&w, path, (mode_t)0) == 0);
     for (i = 0; i < partial; ++i)
     {
         garbage[i] = (unsigned char)(i + 1);
@@ -127,133 +82,105 @@ static void partial_index_entry(int partial)
     append89_close(w);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 1ULL);
+    assert(test_count(l) == 1ULL);
     test_expect(l, 0ULL, "base", 4U);
     ledger89_close(l);
-    assert(test_index_logical_size(path) == LEDGER89_TEST_ENTRY_SIZE);
-    assert(test_data_logical_size(path) == 4);
+    assert(test_logical_size(path) == (off_t)(16 + 16 + 4));
     test_unlink(path);
 }
 
 static void beyond_eof(void)
 {
     char path[160];
-    char data[160];
-    char index[160];
     append89 *w;
     ledger89 *l;
-    unsigned long long count;
     test_path(path, sizeof(path), "rec-beyondeof", 0);
     assert(ledger89_create(path, (mode_t)0600) == 0);
-    data_path(data, sizeof(data), path);
-    index_path(index, sizeof(index), path);
-    assert(append89_open_writer(&w, data, (mode_t)0) == 0);
-    test_append_data(w, "AB", 2U);
-    append89_close(w);
-    assert(append89_open_writer_reserve(&w, index, (mode_t)0,
-                                        LEDGER89_TEST_INDEX_RESERVE) == 0);
-    test_append_index(w, 0ULL, 1ULL, test_crc("A", 1U));
-    test_append_index(w, 1ULL, 1ULL, test_crc("B", 1U));
-    test_append_index(w, 2ULL, 5ULL, test_crc("XXXXX", 5U)); /* extends beyond */
+    assert(ledger89_open_writer(&l, path) == 0);
+    assert(ledger89_append(l, "AB", 2U, NULL) == 0);
+    ledger89_close(l);
+    /* A frame whose header claims 100 payload bytes, with none present. */
+    assert(append89_open_writer(&w, path, (mode_t)0) == 0);
+    test_append_header(w, 100ULL, 0ULL);
     append89_close(w);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 2ULL);
+    assert(test_count(l) == 1ULL);
+    test_expect(l, 0ULL, "AB", 2U);
     ledger89_close(l);
-    assert(test_data_logical_size(path) == 2);
-    assert(test_index_logical_size(path) == 2 * LEDGER89_TEST_ENTRY_SIZE);
+    assert(test_logical_size(path) == (off_t)(16 + 16 + 2));
     test_unlink(path);
 }
 
-static void gap(void)
+static void oversize_frame(void)
 {
     char path[160];
-    char data[160];
-    char index[160];
     append89 *w;
     ledger89 *l;
-    unsigned long long count;
-    test_path(path, sizeof(path), "rec-gap", 0);
+    test_path(path, sizeof(path), "rec-oversize", 0);
     assert(ledger89_create(path, (mode_t)0600) == 0);
-    data_path(data, sizeof(data), path);
-    index_path(index, sizeof(index), path);
-    assert(append89_open_writer(&w, data, (mode_t)0) == 0);
-    test_append_data(w, "AAAAAAAAAABBBBB", 15U);
-    append89_close(w);
-    assert(append89_open_writer_reserve(&w, index, (mode_t)0,
-                                        LEDGER89_TEST_INDEX_RESERVE) == 0);
-    test_append_index(w, 0ULL, 10ULL, test_crc("AAAAAAAAAA", 10U));
-    test_append_index(w, 20ULL, 5ULL, test_crc("BBBBB", 5U)); /* gap */
+    assert(ledger89_open_writer(&l, path) == 0);
+    assert(ledger89_append(l, "AAAAAA", 6U, NULL) == 0);
+    ledger89_close(l);
+    /* A frame whose size violates the reserve cap. */
+    assert(append89_open_writer(&w, path, (mode_t)0) == 0);
+    test_append_header(w, (unsigned long long)APPEND89_RESERVE, 0ULL);
     append89_close(w);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 1ULL);
+    assert(test_count(l) == 1ULL);
+    test_expect(l, 0ULL, "AAAAAA", 6U);
     ledger89_close(l);
-    assert(test_data_logical_size(path) == 10);
+    assert(test_logical_size(path) == (off_t)(16 + 16 + 6));
     test_unlink(path);
 }
 
-static void overlap(void)
+static void checksum_mismatch(void)
 {
     char path[160];
-    char data[160];
-    char index[160];
     append89 *w;
     ledger89 *l;
-    unsigned long long count;
-    test_path(path, sizeof(path), "rec-overlap", 0);
+    test_path(path, sizeof(path), "rec-crc", 0);
     assert(ledger89_create(path, (mode_t)0600) == 0);
-    data_path(data, sizeof(data), path);
-    index_path(index, sizeof(index), path);
-    assert(append89_open_writer(&w, data, (mode_t)0) == 0);
-    test_append_data(w, "AAAAAAAAAA", 10U);
-    append89_close(w);
-    assert(append89_open_writer_reserve(&w, index, (mode_t)0,
-                                        LEDGER89_TEST_INDEX_RESERVE) == 0);
-    test_append_index(w, 0ULL, 10ULL, test_crc("AAAAAAAAAA", 10U));
-    test_append_index(w, 5ULL, 5ULL, test_crc("AAAAA", 5U)); /* overlap */
+    assert(ledger89_open_writer(&l, path) == 0);
+    assert(ledger89_append(l, "keep", 4U, NULL) == 0);
+    ledger89_close(l);
+    /* A frame with a wrong checksum ends the prefix. */
+    assert(append89_open_writer(&w, path, (mode_t)0) == 0);
+    test_append_header(w, 3ULL, test_crc("bad", 3U) ^ 1ULL);
+    assert(append89_append(w, "bad", 3U, NULL) == 0);
     append89_close(w);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 1ULL);
+    assert(test_count(l) == 1ULL);
+    test_expect(l, 0ULL, "keep", 4U);
     ledger89_close(l);
+    assert(test_logical_size(path) == (off_t)(16 + 16 + 4));
     test_unlink(path);
 }
 
-static void invalid_first_entry(void)
+static void invalid_first(void)
 {
     char path[160];
-    char data[160];
-    char index[160];
     append89 *w;
     ledger89 *l;
-    unsigned long long count;
     test_path(path, sizeof(path), "rec-first", 0);
     assert(ledger89_create(path, (mode_t)0600) == 0);
-    data_path(data, sizeof(data), path);
-    index_path(index, sizeof(index), path);
-    assert(append89_open_writer(&w, data, (mode_t)0) == 0);
-    test_append_data(w, "AAAAA", 5U);
-    append89_close(w);
-    assert(append89_open_writer_reserve(&w, index, (mode_t)0,
-                                        LEDGER89_TEST_INDEX_RESERVE) == 0);
-    test_append_index(w, 5ULL, 1ULL, test_crc("A", 1U)); /* offset != 0 */
+    assert(append89_open_writer(&w, path, (mode_t)0) == 0);
+    test_append_header(w, (unsigned long long)APPEND89_RESERVE, 0ULL);
     append89_close(w);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 0ULL);
+    assert(test_count(l) == 0ULL);
     ledger89_close(l);
-    assert(test_data_logical_size(path) == 0);
-    assert(test_index_logical_size(path) == 0);
+    assert(test_logical_size(path) == (off_t)16);
     test_unlink(path);
 }
 
 static void middle_corruption(void)
 {
     char path[160];
-    char index[160];
     ledger89 *l;
-    unsigned long long count;
     int fd;
     unsigned char byte;
     test_path(path, sizeof(path), "rec-middle", 0);
@@ -265,21 +192,18 @@ static void middle_corruption(void)
     assert(ledger89_append(l, "D", 1U, NULL) == 0);
     assert(ledger89_append(l, "E", 1U, NULL) == 0);
     ledger89_close(l);
-    index_path(index, sizeof(index), path);
-    /* Corrupt C's checksum: entry 2, checksum field at 2*32 + 16 = 80. */
-    fd = open(index, O_RDWR);
+    /* C's payload byte sits at 16 + 2*17 + 16 = 66. */
+    fd = open(path, O_RDWR);
     assert(fd >= 0);
-    assert(lseek(fd, 2 * LEDGER89_TEST_ENTRY_SIZE + 16, SEEK_SET) ==
-           2 * LEDGER89_TEST_ENTRY_SIZE + 16);
+    assert(lseek(fd, 66, SEEK_SET) == 66);
     assert(read(fd, &byte, 1U) == 1);
     byte ^= 0x80U;
-    assert(lseek(fd, 2 * LEDGER89_TEST_ENTRY_SIZE + 16, SEEK_SET) ==
-           2 * LEDGER89_TEST_ENTRY_SIZE + 16);
+    assert(lseek(fd, 66, SEEK_SET) == 66);
     assert(write(fd, &byte, 1U) == 1);
     assert(close(fd) == 0);
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_recover(l, NULL, NULL) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 2ULL);
+    assert(test_count(l) == 2ULL);
     test_expect(l, 0ULL, "A", 1U);
     test_expect(l, 1ULL, "B", 1U);
     ledger89_close(l);
@@ -290,16 +214,15 @@ int main(void)
 {
     int i;
     clean_state();
-    uncommitted_data_tail();
-    data_only();
-    for (i = 1; i < (int)LEDGER89_TEST_ENTRY_SIZE; ++i)
+    garbage_tail();
+    for (i = 1; i < (int)LEDGER89_TEST_HEADER_SIZE; ++i)
     {
-        partial_index_entry(i);
+        partial_header(i);
     }
     beyond_eof();
-    gap();
-    overlap();
-    invalid_first_entry();
+    oversize_frame();
+    checksum_mismatch();
+    invalid_first();
     middle_corruption();
     return 0;
 }

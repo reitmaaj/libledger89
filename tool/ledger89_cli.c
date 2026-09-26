@@ -138,15 +138,11 @@ static ledger89_cli_cmd cli_arity(int argc, int expected, ledger89_cli_cmd cmd)
     return LEDGER89_CLI_CMD_USAGE;
 }
 
-ledger89_cli_cmd ledger89_cli_parse(int argc, char **argv, const char **path,
-                                    unsigned long long *number, int *has_number)
+ledger89_cli_cmd ledger89_cli_parse(int argc, char **argv, const char **path)
 {
     const char *cmd;
-    int rc;
 
     *path = NULL;
-    *number = 0ULL;
-    *has_number = 0;
     if (argc < 3)
     {
         return LEDGER89_CLI_CMD_USAGE;
@@ -180,20 +176,6 @@ ledger89_cli_cmd ledger89_cli_parse(int argc, char **argv, const char **path,
     if (strcmp(cmd, "tail") == 0)
     {
         return cli_arity(argc, 3, LEDGER89_CLI_CMD_TAIL);
-    }
-    if (strcmp(cmd, "read") == 0)
-    {
-        if (argc != 4)
-        {
-            return LEDGER89_CLI_CMD_USAGE;
-        }
-        rc = ledger89_cli_parse_number(argv[3], number);
-        if (rc != 0)
-        {
-            return LEDGER89_CLI_CMD_USAGE;
-        }
-        *has_number = 1;
-        return LEDGER89_CLI_CMD_READ;
     }
     return LEDGER89_CLI_CMD_USAGE;
 }
@@ -455,7 +437,6 @@ int ledger89_cli_append(const char *path)
 {
     ledger89 *l;
     ledger89_offset offset;
-    unsigned long long number;
     char *data;
     size_t len;
     int rc;
@@ -474,12 +455,6 @@ int ledger89_cli_append(const char *path)
         rc = cli_fail_free(data, "cannot append to", path);
         return rc;
     }
-    rc = ledger89_count(l, &number);
-    if (rc != 0)
-    {
-        rc = cli_fail_append(l, data, path);
-        return rc;
-    }
     rc = ledger89_append(l, data, len, &offset);
     if (rc != 0)
     {
@@ -488,12 +463,6 @@ int ledger89_cli_append(const char *path)
     }
     ledger89_close(l);
     free(data);
-    rc = cli_write_number(number, "\t");
-    if (rc != 0)
-    {
-        rc = cli_fail("cannot write stdout for", path);
-        return rc;
-    }
     rc = cli_write_number((unsigned long long)offset, "\n");
     if (rc != 0)
     {
@@ -521,84 +490,6 @@ static int cli_fail_close(ledger89 *l, const char *what, const char *path)
     ledger89_close(l);
     rc = cli_fail(what, path);
     return rc;
-}
-
-static int cli_find_record(ledger89_iter *it, unsigned long long number)
-{
-    int rc;
-
-    for (;;)
-    {
-        rc = ledger89_iter_next(it);
-        if (rc == LEDGER89_OK)
-        {
-            if (ledger89_iter_index(it) == number)
-            {
-                return 0;
-            }
-            continue;
-        }
-        if (rc == LEDGER89_END)
-        {
-            return 1;
-        }
-        return -1;
-    }
-}
-
-int ledger89_cli_read(const char *path, unsigned long long number)
-{
-    ledger89 *l;
-    ledger89_iter *it;
-    unsigned char buf[LEDGER89_CLI_CHUNK];
-    ssize_t n;
-    int rc;
-
-    rc = ledger89_open_reader(&l, path);
-    if (rc != 0)
-    {
-        rc = cli_fail("cannot read", path);
-        return rc;
-    }
-    rc = ledger89_iter_begin(l, &it);
-    if (rc != LEDGER89_OK)
-    {
-        rc = cli_fail_close(l, "cannot read", path);
-        return rc;
-    }
-    rc = cli_find_record(it, number);
-    if (rc == 1)
-    {
-        rc = cli_fail_reader(l, it, "no such record for", path);
-        return rc;
-    }
-    if (rc != 0)
-    {
-        rc = cli_fail_reader(l, it, "cannot read record for", path);
-        return rc;
-    }
-    for (;;)
-    {
-        n = ledger89_iter_read(it, buf, sizeof(buf));
-        if (n < 0)
-        {
-            rc = cli_fail_reader(l, it, "cannot read record for", path);
-            return rc;
-        }
-        if (n == 0)
-        {
-            break;
-        }
-        rc = ledger89_cli_write_all(STDOUT_FILENO, buf, (size_t)n);
-        if (rc != 0)
-        {
-            rc = cli_fail_reader(l, it, "cannot write stdout for", path);
-            return rc;
-        }
-    }
-    ledger89_iter_close(it);
-    ledger89_close(l);
-    return 0;
 }
 
 static int cli_write_scan_line(ledger89_iter *it)
@@ -697,9 +588,37 @@ int ledger89_cli_scan(const char *path)
     return 0;
 }
 
+GREEN_PURE
+static unsigned long long cli_inc(unsigned long long value)
+{
+    return value + 1ULL;
+}
+
+static int cli_count_loop(ledger89_iter *it, unsigned long long *number)
+{
+    int rc;
+
+    *number = 0ULL;
+    for (;;)
+    {
+        rc = ledger89_iter_next(it);
+        if (rc == LEDGER89_OK)
+        {
+            *number = cli_inc(*number);
+            continue;
+        }
+        if (rc == LEDGER89_END)
+        {
+            return 0;
+        }
+        return -1;
+    }
+}
+
 int ledger89_cli_count(const char *path)
 {
     ledger89 *l;
+    ledger89_iter *it;
     unsigned long long number;
     int rc;
 
@@ -709,13 +628,20 @@ int ledger89_cli_count(const char *path)
         rc = cli_fail("cannot count", path);
         return rc;
     }
-    rc = ledger89_count(l, &number);
-    if (rc != 0)
+    rc = ledger89_iter_begin(l, &it);
+    if (rc != LEDGER89_OK)
     {
         rc = cli_fail_close(l, "cannot count", path);
         return rc;
     }
+    rc = cli_count_loop(it, &number);
+    ledger89_iter_close(it);
     ledger89_close(l);
+    if (rc != 0)
+    {
+        rc = cli_fail("cannot count", path);
+        return rc;
+    }
     rc = cli_write_number(number, "\n");
     if (rc != 0)
     {

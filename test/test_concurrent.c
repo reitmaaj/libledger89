@@ -40,8 +40,7 @@ int main(void)
         test_wait(children[i], 0);
     }
     assert(ledger89_open_reader(&l, path) == 0);
-    assert(ledger89_count(l, &count) == 0);
-    assert(count == 48ULL);
+    assert(test_count(l) == 48ULL);
     assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
     previous = -1;
     count = 0ULL;

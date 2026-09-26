@@ -16,7 +16,6 @@ typedef enum
 {
     LEDGER89_CLI_CMD_INIT = 0,
     LEDGER89_CLI_CMD_APPEND,
-    LEDGER89_CLI_CMD_READ,
     LEDGER89_CLI_CMD_SCAN,
     LEDGER89_CLI_CMD_COUNT,
     LEDGER89_CLI_CMD_CHECK,
@@ -25,12 +24,10 @@ typedef enum
     LEDGER89_CLI_CMD_USAGE
 } ledger89_cli_cmd;
 
-/* Parse argv into a command, its path, and (for read) a 0-based record number.
- * Pure. has_number is 1 when number was supplied and parsed. */
-ledger89_cli_cmd ledger89_cli_parse(int argc, char **argv, const char **path,
-                                    unsigned long long *number, int *has_number);
+/* Parse argv into a command and its path. Pure. */
+ledger89_cli_cmd ledger89_cli_parse(int argc, char **argv, const char **path);
 
-/* Parse a non-negative decimal record number. Return 0 or -1. */
+/* Parse a non-negative decimal number. Return 0 or -1. */
 int ledger89_cli_parse_number(const char *text, unsigned long long *out);
 
 /* Format a non-negative integer as decimal digits into buf. Returns the digit
@@ -46,7 +43,6 @@ int ledger89_cli_write_all(int fd, const void *data, size_t size);
 /* Commands. Each returns a process exit status. */
 int ledger89_cli_init(const char *path);
 int ledger89_cli_append(const char *path);
-int ledger89_cli_read(const char *path, unsigned long long number);
 int ledger89_cli_scan(const char *path);
 int ledger89_cli_count(const char *path);
 int ledger89_cli_check(const char *path);

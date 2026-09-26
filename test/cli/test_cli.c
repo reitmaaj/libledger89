@@ -14,8 +14,6 @@
 #include "ledger89/admin.h"
 #include "ledger89_cli.h"
 
-#define CLI_INDEX_RESERVE 4096U
-
 static void parse_number_ok(const char *text, unsigned long long expected)
 {
     unsigned long long out;
@@ -66,36 +64,24 @@ static void test_format_number(void)
     format_roundtrip(18446744073709551615ULL);
 }
 
-static ledger89_cli_cmd parse_args(int argc, char **argv, const char **path,
-                                   unsigned long long *num, int *has)
+static ledger89_cli_cmd parse_args(int argc, char **argv, const char **path)
 {
-    return ledger89_cli_parse(argc, argv, path, num, has);
+    return ledger89_cli_parse(argc, argv, path);
 }
 
 static void test_parse(void)
 {
     char *init[] = {"ledger89", "init", "p"};
     char *append[] = {"ledger89", "append", "p"};
-    char *read_ok[] = {"ledger89", "read", "p", "5"};
-    char *read_bad[] = {"ledger89", "read", "p", "x"};
-    char *read_missing[] = {"ledger89", "read", "p"};
     char *extra[] = {"ledger89", "scan", "p", "x"};
     char *few[] = {"ledger89", "count"};
     const char *path;
-    unsigned long long num;
-    int has;
 
-    assert(parse_args(3, init, &path, &num, &has) == LEDGER89_CLI_CMD_INIT);
+    assert(parse_args(3, init, &path) == LEDGER89_CLI_CMD_INIT);
     assert(strcmp(path, "p") == 0);
-    assert(parse_args(3, append, &path, &num, &has) == LEDGER89_CLI_CMD_APPEND);
-    assert(parse_args(4, read_ok, &path, &num, &has) == LEDGER89_CLI_CMD_READ);
-    assert(has == 1 && num == 5ULL);
-    assert(parse_args(4, read_bad, &path, &num, &has) ==
-           LEDGER89_CLI_CMD_USAGE);
-    assert(parse_args(3, read_missing, &path, &num, &has) ==
-           LEDGER89_CLI_CMD_USAGE);
-    assert(parse_args(4, extra, &path, &num, &has) == LEDGER89_CLI_CMD_USAGE);
-    assert(parse_args(2, few, &path, &num, &has) == LEDGER89_CLI_CMD_USAGE);
+    assert(parse_args(3, append, &path) == LEDGER89_CLI_CMD_APPEND);
+    assert(parse_args(4, extra, &path) == LEDGER89_CLI_CMD_USAGE);
+    assert(parse_args(2, few, &path) == LEDGER89_CLI_CMD_USAGE);
 }
 
 static void test_read_write_all(void)
@@ -118,8 +104,6 @@ static void test_read_write_all(void)
 static void test_check_repair(void)
 {
     char path[128];
-    char index[160];
-    char data[160];
     append89 *w;
     ledger89 *l;
     unsigned char partial[5] = {1U, 2U, 3U, 4U, 5U};
@@ -129,19 +113,15 @@ static void test_check_repair(void)
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_append(l, "base", 4U, NULL) == 0);
     ledger89_close(l);
-    /* Craft a partial final INDEX entry. */
-    (void)snprintf(index, sizeof(index), "%s.index", path);
-    assert(append89_open_writer_reserve(&w, index, (mode_t)0,
-                                        CLI_INDEX_RESERVE) == 0);
+    /* Craft a partial final header. */
+    assert(append89_open_writer(&w, path, (mode_t)0) == 0);
     assert(append89_append(w, partial, sizeof(partial), NULL) == 0);
     append89_close(w);
     /* check reports an incomplete tail (exit 1); repair removes it (exit 0). */
     assert(ledger89_cli_check(path) == 1);
     assert(ledger89_cli_repair(path) == 0);
     assert(ledger89_cli_check(path) == 0);
-    (void)snprintf(data, sizeof(data), "%s.data", path);
-    assert(unlink(data) == 0);
-    assert(unlink(index) == 0);
+    assert(unlink(path) == 0);
 }
 
 int main(void)

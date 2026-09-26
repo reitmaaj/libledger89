@@ -12,6 +12,7 @@
 #define PAYLOAD 96
 #define TOTAL (WRITERS * RECORDS)
 #define MAX_POLLS 20000
+#define FRAME (PAYLOAD + LEDGER89_TEST_HEADER_SIZE)
 
 /* Validate the record an iterator is positioned on: fixed length, full
  * checksum-verified payload, and a decodable writer id / sequence with a
@@ -75,7 +76,7 @@ static void reader_run(const char *path)
         ledger89_offset expected;
         unsigned long long idx;
         assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
-        expected = 0;
+        expected = (ledger89_offset)32;
         idx = 0ULL;
         for (;;)
         {
@@ -95,7 +96,7 @@ static void reader_run(const char *path)
                 (void)wid;
                 (void)seq;
             }
-            expected += (ledger89_offset)ledger89_iter_length(it);
+            expected += (ledger89_offset)FRAME;
             ++idx;
         }
         ledger89_iter_close(it);
@@ -124,15 +125,13 @@ static void verify_final(const char *path)
     ledger89 *l;
     ledger89_iter *it;
     int seen[WRITERS][RECORDS];
-    unsigned long long count;
     ledger89_offset expected;
     unsigned long long idx;
     memset(seen, 0, sizeof(seen));
     assert(ledger89_open_reader(&l, path) == 0);
-    assert(ledger89_count(l, &count) == 0);
-    assert(count == (unsigned long long)TOTAL);
+    assert(test_count(l) == (unsigned long long)TOTAL);
     assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
-    expected = 0;
+    expected = (ledger89_offset)32;
     idx = 0ULL;
     for (;;)
     {
@@ -152,7 +151,7 @@ static void verify_final(const char *path)
             assert(seen[wid][seq] == 0);
             seen[wid][seq] = 1;
         }
-        expected += (ledger89_offset)ledger89_iter_length(it);
+        expected += (ledger89_offset)FRAME;
         ++idx;
     }
     assert(idx == (unsigned long long)TOTAL);

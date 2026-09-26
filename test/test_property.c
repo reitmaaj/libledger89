@@ -50,10 +50,8 @@ static void model_check(ledger89 *l, unsigned char model[PROP_MAX_RECORDS]
                                                     [PROP_MAX_SIZE],
                         const size_t *sizes, size_t count)
 {
-    unsigned long long n;
     size_t i;
-    assert(ledger89_count(l, &n) == 0);
-    assert(n == (unsigned long long)count);
+    assert(test_count(l) == (unsigned long long)count);
     for (i = 0U; i < count; ++i)
     {
         test_expect(l, (unsigned long long)i, model[i], sizes[i]);

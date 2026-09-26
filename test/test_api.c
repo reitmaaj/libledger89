@@ -53,24 +53,33 @@ static void append_arguments(void)
     test_unlink(path);
 }
 
-static void read_arguments(void)
+static void reserve_cap(void)
 {
     char path[160];
     ledger89 *l;
-    unsigned long long count;
-    char buf[4];
-    test_path(path, sizeof(path), "api-read", 0);
+    ledger89_iter *it;
+    unsigned char *payload;
+    size_t max;
+    size_t i;
+    test_path(path, sizeof(path), "api-cap", 0);
     assert(ledger89_create(path, (mode_t)0600) == 0);
     assert(ledger89_open_writer(&l, path) == 0);
-    assert(ledger89_append(l, "data", 4U, NULL) == 0);
-    assert(ledger89_count(l, NULL) == -1 && errno == EINVAL);
-    assert(ledger89_read(l, 0ULL, NULL, 4U) == -1 && errno == EINVAL);
-    assert(ledger89_read(l, 0ULL, buf, 0U) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 1ULL);
-    /* Out-of-range record. */
-    assert(ledger89_read(l, 1ULL, buf, sizeof(buf)) == 0);
-    assert(ledger89_length(l, 1ULL) == 0ULL);
-    assert(ledger89_offset_of(l, 1ULL) == (ledger89_offset)-1);
+    max = (size_t)APPEND89_RESERVE - LEDGER89_TEST_HEADER_SIZE;
+    /* Oversize fails E2BIG before any I/O; the ledger is unchanged. */
+    assert(ledger89_append(l, "x", max + 1U, NULL) == -1 && errno == E2BIG);
+    assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
+    assert(ledger89_iter_next(it) == LEDGER89_END);
+    ledger89_iter_close(it);
+    /* The maximum payload length appends and reads back byte-for-byte. */
+    payload = (unsigned char *)malloc(max);
+    assert(payload != NULL);
+    for (i = 0U; i < max; ++i)
+    {
+        payload[i] = (unsigned char)(i * 13U + 7U);
+    }
+    assert(ledger89_append(l, payload, max, NULL) == 0);
+    test_expect(l, 0ULL, payload, max);
+    free(payload);
     ledger89_close(l);
     test_unlink(path);
 }
@@ -86,6 +95,7 @@ static void iter_errors(void)
     assert(ledger89_iter_begin(l, NULL) == -1 && errno == EINVAL);
     assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
     assert(ledger89_iter_next(NULL) == -1 && errno == EINVAL);
+    assert(ledger89_iter_read(it, NULL, 1U) == -1 && errno == EINVAL);
     ledger89_iter_close(it);
     ledger89_close(l);
     test_unlink(path);
@@ -96,17 +106,15 @@ static void stale_errno(void)
     char path[160];
     ledger89 *l;
     ledger89_offset off;
-    unsigned long long count;
     test_path(path, sizeof(path), "api-errno", 0);
     assert(ledger89_create(path, (mode_t)0600) == 0);
     assert(ledger89_open_writer(&l, path) == 0);
     errno = EINVAL;
     assert(ledger89_append(l, "ok", 2U, &off) == 0);
-    assert(off == 0);
+    assert(off == (ledger89_offset)32);
     ledger89_close(l);
     assert(ledger89_open_reader(&l, path) == 0);
     errno = ENOSPC;
-    assert(ledger89_count(l, &count) == 0 && count == 1ULL);
     test_expect(l, 0ULL, "ok", 2U);
     ledger89_close(l);
     test_unlink(path);
@@ -117,20 +125,19 @@ static void empty_ledger(void)
     char path[160];
     ledger89 *l;
     ledger89_iter *it;
-    unsigned long long count;
     test_path(path, sizeof(path), "api-empty", 0);
     assert(ledger89_create(path, (mode_t)0600) == 0);
     assert(ledger89_open_reader(&l, path) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 0ULL);
     assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
     assert(ledger89_iter_next(it) == LEDGER89_END);
     ledger89_iter_close(it);
     ledger89_close(l);
     assert(ledger89_open_writer(&l, path) == 0);
-    assert(ledger89_count(l, &count) == 0 && count == 0ULL);
+    assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
+    assert(ledger89_iter_next(it) == LEDGER89_END);
+    ledger89_iter_close(it);
     ledger89_close(l);
-    assert(test_data_logical_size(path) == 0);
-    assert(test_index_logical_size(path) == 0);
+    assert(test_logical_size(path) == (off_t)LEDGER89_TEST_PREAMBLE_SIZE);
     test_unlink(path);
 }
 
@@ -169,7 +176,6 @@ static void multiple_appends(void)
 {
     char path[160];
     ledger89 *l;
-    ledger89_offset off;
     static const char *const items[] = {"", "a", "bc", "", "defgh", "i", ""};
     static const size_t sizes[] = {0U, 1U, 2U, 0U, 5U, 1U, 0U};
     size_t i;
@@ -178,8 +184,7 @@ static void multiple_appends(void)
     assert(ledger89_open_writer(&l, path) == 0);
     for (i = 0U; i < sizeof(sizes) / sizeof(sizes[0]); ++i)
     {
-        assert(ledger89_append(l, items[i], sizes[i], &off) == 0);
-        (void)off;
+        assert(ledger89_append(l, items[i], sizes[i], NULL) == 0);
     }
     test_expect_all(l, items, sizes, sizeof(sizes) / sizeof(sizes[0]));
     ledger89_close(l);
@@ -235,7 +240,7 @@ int main(void)
     create_errors();
     writer_only_errors();
     append_arguments();
-    read_arguments();
+    reserve_cap();
     iter_errors();
     stale_errno();
     empty_ledger();
