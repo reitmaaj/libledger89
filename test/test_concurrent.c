@@ -1,24 +1,22 @@
+/* Layer 8: multiprocess writer serialization and total-order verification. */
 #include "support.h"
 
 int main(void)
 {
     char path[160];
     char payload[83];
-    ledger89 *a;
-    ledger89_message *m;
-    ledger89_offset cursor;
-    ledger89_offset previous;
+    ledger89 *l;
+    ledger89_iter *it;
     pid_t children[4];
     int seen[4][12];
+    unsigned long long count;
+    ledger89_offset previous;
     int i;
     int j;
     int id;
     int sequence;
-    int count;
-    size_t done;
-    ssize_t n;
     test_path(path, sizeof(path), "concurrent", 0);
-    assert(ledger89_create(path, (mode_t)0600, 40U) == 0);
+    assert(ledger89_create(path, (mode_t)0600) == 0);
     memset(seen, 0, sizeof(seen));
     for (i = 0; i < 4; ++i)
     {
@@ -26,14 +24,14 @@ int main(void)
         assert(children[i] >= 0);
         if (children[i] == 0)
         {
-            assert(ledger89_open_writer(&a, path, 40U) == 0);
+            assert(ledger89_open_writer(&l, path) == 0);
             for (j = 0; j < 12; ++j)
             {
                 memset(payload, 'A' + i, sizeof(payload));
                 payload[1] = (char)('a' + j);
-                assert(ledger89_append(a, payload, sizeof(payload), NULL) == 0);
+                assert(ledger89_append(l, payload, sizeof(payload), NULL) == 0);
             }
-            ledger89_close(a);
+            ledger89_close(l);
             _exit(0);
         }
     }
@@ -41,35 +39,40 @@ int main(void)
     {
         test_wait(children[i], 0);
     }
-    assert(ledger89_open_reader(&a, path, 40U) == 0);
-    cursor = LEDGER89_BEGIN;
-    previous = 0;
-    count = 0;
-    while (ledger89_next(a, &cursor, &m) == LEDGER89_OK)
+    assert(ledger89_open_reader(&l, path) == 0);
+    assert(ledger89_count(l, &count) == 0);
+    assert(count == 48ULL);
+    assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
+    previous = -1;
+    count = 0ULL;
+    while (ledger89_iter_next(it) == LEDGER89_OK)
     {
-        assert(ledger89_message_offset(m) > previous);
-        previous = ledger89_message_offset(m);
+        unsigned char buf[83];
+        size_t done;
+        ssize_t n;
+        assert(ledger89_iter_offset(it) > previous);
+        previous = ledger89_iter_offset(it);
+        assert(ledger89_iter_length(it) == sizeof(payload));
         done = 0U;
-        while (done < sizeof(payload))
+        while ((n = ledger89_iter_read(it, buf + done, sizeof(buf) - done)) > 0)
         {
-            n = ledger89_message_read(m, payload + done, sizeof(payload) - done);
-            assert(n > 0);
             done += (size_t)n;
         }
-        id = payload[0] - 'A';
-        sequence = payload[1] - 'a';
+        assert(n == 0 && done == sizeof(payload));
+        id = buf[0] - 'A';
+        sequence = buf[1] - 'a';
         assert(id >= 0 && id < 4 && sequence >= 0 && sequence < 12);
         assert(seen[id][sequence] == 0);
         seen[id][sequence] = 1;
         for (i = 2; i < (int)sizeof(payload); ++i)
         {
-            assert(payload[i] == 'A' + id);
+            assert(buf[i] == 'A' + id);
         }
-        ledger89_message_close(m);
         ++count;
     }
-    assert(count == 48);
-    ledger89_close(a);
-    assert(unlink(path) == 0);
+    assert(count == 48ULL);
+    ledger89_iter_close(it);
+    ledger89_close(l);
+    test_unlink(path);
     return 0;
 }

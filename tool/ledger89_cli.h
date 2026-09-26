@@ -18,27 +18,24 @@ typedef enum
     LEDGER89_CLI_CMD_APPEND,
     LEDGER89_CLI_CMD_READ,
     LEDGER89_CLI_CMD_SCAN,
+    LEDGER89_CLI_CMD_COUNT,
     LEDGER89_CLI_CMD_CHECK,
     LEDGER89_CLI_CMD_REPAIR,
     LEDGER89_CLI_CMD_TAIL,
     LEDGER89_CLI_CMD_USAGE
 } ledger89_cli_cmd;
 
-/* Parse argv into a command, its path, and (for read/scan) an optional offset.
- * Pure. has_offset is 1 when offset was supplied and parsed. */
+/* Parse argv into a command, its path, and (for read) a 0-based record number.
+ * Pure. has_number is 1 when number was supplied and parsed. */
 ledger89_cli_cmd ledger89_cli_parse(int argc, char **argv, const char **path,
-                                    ledger89_offset *offset, int *has_offset);
+                                    unsigned long long *number, int *has_number);
 
-/* Parse a non-negative decimal offset. Return 0 or -1. */
-int ledger89_cli_parse_offset(const char *text, ledger89_offset *out);
+/* Parse a non-negative decimal record number. Return 0 or -1. */
+int ledger89_cli_parse_number(const char *text, unsigned long long *out);
 
-/* Format a non-negative offset as decimal digits into buf. Returns the digit
+/* Format a non-negative integer as decimal digits into buf. Returns the digit
  * count; no NUL terminator. buf must hold at least 32 bytes. */
-size_t ledger89_cli_format_offset(char *buf, ledger89_offset value);
-
-/* Format a message length (unsigned long long) as decimal digits into buf.
- * Returns the digit count; no NUL terminator. buf must hold at least 32 bytes. */
-size_t ledger89_cli_format_length(char *buf, unsigned long long value);
+size_t ledger89_cli_format_number(char *buf, unsigned long long value);
 
 /* Read all of fd into a growable buffer. Return 0, or -1 on error. */
 int ledger89_cli_read_all(int fd, char **out, size_t *out_len);
@@ -49,8 +46,9 @@ int ledger89_cli_write_all(int fd, const void *data, size_t size);
 /* Commands. Each returns a process exit status. */
 int ledger89_cli_init(const char *path);
 int ledger89_cli_append(const char *path);
-int ledger89_cli_read(const char *path, ledger89_offset offset);
-int ledger89_cli_scan(const char *path, ledger89_offset offset, int has_offset);
+int ledger89_cli_read(const char *path, unsigned long long number);
+int ledger89_cli_scan(const char *path);
+int ledger89_cli_count(const char *path);
 int ledger89_cli_check(const char *path);
 int ledger89_cli_repair(const char *path);
 int ledger89_cli_tail(const char *path);

@@ -1,70 +1,165 @@
 #ifndef LEDGER89_H
 #define LEDGER89_H
 
+/*
+ * ledger89.h - a durable append-only sequence of opaque byte records stored
+ * in two libappend89 byte streams: a DATA file of raw payloads and an INDEX
+ * file of fixed-size descriptors. The INDEX file defines record boundaries,
+ * order, and commit state; the DATA file alone does not.
+ *
+ * The API is ISO C89. It depends on libappend89 and libcksum89. Public
+ * functions use the POSIX syscall error profile (CONVENTIONS.md section 14):
+ * 0 on success, -1 on failure with errno set to a standard platform value.
+ * LEDGER89_OK and LEDGER89_END are ordinary outcomes returned by iteration.
+ */
+
 #include <stddef.h>
 #include <sys/types.h>
-#include <sys/uio.h>
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-typedef struct ledger89 ledger89;
-typedef struct ledger89_message ledger89_message;
-typedef off_t ledger89_offset;
+    /*
+     * Opaque handles. A ledger handle owns the DATA and INDEX streams. An
+     * iterator borrows its ledger and yields one committed record at a time.
+     */
+    typedef struct ledger89 ledger89;
+    typedef struct ledger89_iter ledger89_iter;
 
-#define LEDGER89_BEGIN ((ledger89_offset)16)
+    /*
+     * An absolute byte offset into the DATA stream.
+     */
+    typedef off_t ledger89_offset;
+
 #define LEDGER89_OK 0
 #define LEDGER89_END 1
-#define LEDGER89_PARTIAL 2
 
-/* reserve=0 selects the append default. Otherwise reserve must exceed 24.
- * create installs an initialized, file-synced ledger without replacing path.
- * The application syncs the containing directory for durable naming.
- * Existing files use their original reserve; a mismatch is rejected.
- * Fallible calls return 0 (or a positive LEDGER89_* outcome) on success and
- * -1 on failure with a standard platform errno (CONVENTIONS.md section 14).
- * EINVAL marks invalid arguments or a malformed preamble/reserve; EILSEQ marks
- * structural corruption; EIO marks an uncertain or poisoned I/O outcome. */
-int ledger89_create(const char *path, mode_t mode, size_t reserve);
-int ledger89_open_reader(ledger89 **out, const char *path, size_t reserve);
-int ledger89_open_writer(ledger89 **out, const char *path, size_t reserve);
-void ledger89_close(ledger89 *a);
+    /*
+     * Create a new empty ledger. "<name>.data" and "<name>.index" are both
+     * created inside one exclusively created sibling temporary directory and
+     * installed by non-replacing hard link, so if either target already
+     * exists the call fails with EEXIST and nothing is installed. mode is
+     * subject to the process umask. The application synchronizes the
+     * containing directory for durable naming.
+     *
+     * On success return 0. On failure return -1 with errno meaningful.
+     */
+    int ledger89_create(const char *name, mode_t mode);
 
-/* One lock covers all fragments. No rollback on failure: later writers can
- * start at EOF, and readers skip the abandoned predecessor. offset changes
- * only on success. An EIO failure here may mean the publication/unlock outcome
- * requires caller reconciliation; close the poisoned handle. Sync alone
- * promises durability. Data and iov storage are borrowed for the call. */
-int ledger89_append(ledger89 *a, const void *data, size_t size,
-                    ledger89_offset *offset);
-int ledger89_appendv(ledger89 *a, const struct iovec *iov, int iovcnt,
-                     ledger89_offset *offset);
-int ledger89_sync(ledger89 *a);
+    /*
+     * Open an existing ledger for reading, or for reading and writing. name
+     * must be non-NULL; *out is set to NULL before any operation that may
+     * fail. Opening never creates or repairs a file. A reader handle permits
+     * count, read, and iteration; a writer handle additionally permits append
+     * and recover.
+     *
+     * On success return 0 with *out set. On failure return -1 with *out NULL
+     * and errno meaningful.
+     */
+    int ledger89_open_reader(ledger89 **out, const char *name);
+    int ledger89_open_writer(ledger89 **out, const char *name);
 
-/* Validate the next complete message using constant working memory, then
- * return a payload view borrowing a. Caller closes views before closing a.
- * OK advances cursor past that message. END/PARTIAL advance it past abandoned
- * messages, retaining the current incomplete start for retry. Errors leave
- * cursor unchanged. out is NULL except on OK. Start with LEDGER89_BEGIN.
- * Concurrent appends are supported; truncate/recovery are excluded. */
-int ledger89_next(ledger89 *a, ledger89_offset *cursor,
-                  ledger89_message **out);
-unsigned long long ledger89_message_length(const ledger89_message *message);
-ledger89_offset ledger89_message_offset(const ledger89_message *message);
-ssize_t ledger89_message_read(ledger89_message *message, void *data, size_t size);
-void ledger89_message_close(ledger89_message *message);
+    /*
+     * Close the handle and release resources. NULL is a no-op. Iterators
+     * borrowing the ledger must be closed first.
+     */
+    void ledger89_close(ledger89 *l);
 
-/* Exclusive maintenance ONLY: caller must exclude all other access/openers.
- * Scan, shrink any incomplete final message, sync even on a clean tail.
- * Complete malformed headers cause EILSEQ without truncation. before/after
- * are written only on success. Open reader/writer descriptors before locking.
- * System crash requires this phase before restarting normal writers. */
-int ledger89_recover(ledger89 *a, ledger89_offset *before,
-                     ledger89_offset *after);
+    /*
+     * Append one record. data may be NULL only when size is zero. The payload
+     * is borrowed for the duration of the call and is never copied as a whole.
+     * The record commits only after the DATA extent is synchronized and its
+     * INDEX entry is appended and synchronized. On success return 0 and, when
+     * offset is not NULL, set *offset to the DATA offset of the new record
+     * (equal to the committed end before the append).
+     *
+     * A failure may leave an uncommitted DATA tail or a partial final INDEX
+     * entry; recovery resolves it. Do not infer commit status from the return
+     * value alone after an I/O error during INDEX synchronization.
+     */
+    int ledger89_append(ledger89 *l, const void *data, size_t size,
+                        ledger89_offset *offset);
+
+    /*
+     * Report the number of committed records. count must be non-NULL. Readers
+     * count only complete, valid INDEX entries.
+     */
+    int ledger89_count(ledger89 *l, unsigned long long *count);
+
+    /*
+     * Return the payload length of committed record n (0-based), or 0 when n
+     * is out of range or l is NULL.
+     */
+    unsigned long long ledger89_length(ledger89 *l, unsigned long long n);
+
+    /*
+     * Return the DATA offset of committed record n, or (ledger89_offset)-1
+     * when n is out of range or l is NULL.
+     */
+    ledger89_offset ledger89_offset_of(ledger89 *l, unsigned long long n);
+
+    /*
+     * Read committed record n into the caller buffer, returning the number of
+     * bytes read, 0 when n is past the end or size is zero, or -1 on failure.
+     * The checksum of the record is verified while reading; a checksum
+     * mismatch fails with EILSEQ.
+     */
+    ssize_t ledger89_read(ledger89 *l, unsigned long long n, void *data,
+                          size_t size);
+
+    /*
+     * Begin iteration over committed records. On success return LEDGER89_OK
+     * with *out set to an iterator positioned before the first record. On
+     * failure return -1 with *out NULL.
+     */
+    int ledger89_iter_begin(ledger89 *l, ledger89_iter **out);
+
+    /*
+     * Advance the iterator to the next committed record. Returns LEDGER89_OK
+     * on advance, LEDGER89_END when no further record exists, or -1 on
+     * failure. A newly created iterator must be advanced once before use.
+     */
+    int ledger89_iter_next(ledger89_iter *it);
+
+    /*
+     * Accessors over the current record of a positioned iterator. index is the
+     * 0-based record number, length its payload length, and offset its DATA
+     * offset. When the iterator is not positioned the values are undefined.
+     */
+    unsigned long long ledger89_iter_index(const ledger89_iter *it);
+    unsigned long long ledger89_iter_length(const ledger89_iter *it);
+    ledger89_offset ledger89_iter_offset(const ledger89_iter *it);
+
+    /*
+     * Read from the iterator's current record, advancing an internal position.
+     * Returns the number of bytes read, 0 at the end of the record or for a
+     * zero-sized request, or -1 on failure. The checksum is verified while
+     * reading. The iterator keeps its own read position, independent of
+     * ledger89_read.
+     */
+    ssize_t ledger89_iter_read(ledger89_iter *it, void *data, size_t size);
+
+    /*
+     * Close an iterator. NULL is a no-op. The borrowed ledger must outlive the
+     * iterator.
+     */
+    void ledger89_iter_close(ledger89_iter *it);
+
+    /*
+     * Exclusive recovery. The caller MUST exclude all other access and openers.
+     * Recovery removes a partial final INDEX entry, validates the INDEX prefix,
+     * truncates any invalid INDEX suffix and uncommitted DATA tail, and
+     * synchronizes modified files. It is idempotent. On success return 0 and,
+     * when non-NULL, write the DATA size before and after recovery to before
+     * and after. On failure return -1.
+     */
+    int ledger89_recover(ledger89 *l, ledger89_offset *before,
+                         ledger89_offset *after);
 
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* LEDGER89_H */

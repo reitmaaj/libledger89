@@ -12,10 +12,14 @@
 #include <unistd.h>
 #include "ledger89.h"
 #include "append89.h"
+#include "cksum89.h"
 #include "fault.h"
 
-/* Native unsigned long long test helpers (libll89 is gone). */
-static void u64_store_be(unsigned char out[8], unsigned long long value)
+#define LEDGER89_TEST_ENTRY_SIZE 32U
+#define LEDGER89_TEST_MAGIC 0x4c443839ULL
+#define LEDGER89_TEST_INDEX_RESERVE 4096U
+
+static void test_u64_store_be(unsigned char out[8], unsigned long long value)
 {
     int i;
     for (i = 7; i >= 0; --i)
@@ -25,19 +29,47 @@ static void u64_store_be(unsigned char out[8], unsigned long long value)
     }
 }
 
-static int u64_to_size(unsigned long long value, size_t *out)
+static unsigned long long test_u64_load_be(const unsigned char in[8])
 {
-    if (value > (unsigned long long)(size_t)-1)
+    unsigned long long value;
+    int i;
+    value = 0ULL;
+    for (i = 0; i < 8; ++i)
     {
-        return -1;
+        value = (value << 8) | (unsigned long long)in[i];
     }
-    *out = (size_t)value;
-    return 0;
+    return value;
+}
+
+static unsigned long long test_crc(const void *data, size_t size)
+{
+    cksum89_u64 value;
+    value = cksum89_crc64_nvme(data, size);
+    return ((unsigned long long)value.hi << 32) | (unsigned long long)value.lo;
+}
+
+/* Encode one 32-byte INDEX entry exactly as the library does. */
+static void test_entry(unsigned char out[LEDGER89_TEST_ENTRY_SIZE],
+                       unsigned long long offset, unsigned long long length,
+                       unsigned long long checksum)
+{
+    test_u64_store_be(out, offset);
+    test_u64_store_be(out + 8, length);
+    test_u64_store_be(out + 16, checksum);
+    out[24] = (unsigned char)((LEDGER89_TEST_MAGIC >> 24) & 0xffULL);
+    out[25] = (unsigned char)((LEDGER89_TEST_MAGIC >> 16) & 0xffULL);
+    out[26] = (unsigned char)((LEDGER89_TEST_MAGIC >> 8) & 0xffULL);
+    out[27] = (unsigned char)(LEDGER89_TEST_MAGIC & 0xffULL);
+    out[28] = 0U;
+    out[29] = 1U;
+    out[30] = 0U;
+    out[31] = 0U;
 }
 
 static void test_path(char *path, size_t size, const char *tag, int number)
 {
-    (void)snprintf(path, size, "/tmp/ledger89-%s-%ld-%d", tag, (long)getpid(), number);
+    (void)snprintf(path, size, "/tmp/ledger89-%s-%ld-%d", tag, (long)getpid(),
+                   number);
 }
 
 static void test_wait(pid_t child, int killed)
@@ -54,28 +86,6 @@ static void test_wait(pid_t child, int killed)
     }
 }
 
-static void test_expect(ledger89 *a, ledger89_offset *cursor,
-                        const void *data, size_t size)
-{
-    ledger89_message *m;
-    unsigned char buf[4096];
-    size_t done;
-    size_t length;
-    ssize_t n;
-    assert(ledger89_next(a, cursor, &m) == LEDGER89_OK);
-    assert(u64_to_size(ledger89_message_length(m), &length) == 0);
-    assert(length == size);
-    done = 0U;
-    while ((n = ledger89_message_read(m, buf, sizeof(buf))) > 0)
-    {
-        assert((size_t)n <= size - done);
-        assert(memcmp(buf, (const unsigned char *)data + done, (size_t)n) == 0);
-        done += (size_t)n;
-    }
-    assert(n == 0 && done == size);
-    ledger89_message_close(m);
-}
-
 static off_t test_size(const char *path)
 {
     struct stat st;
@@ -83,23 +93,145 @@ static off_t test_size(const char *path)
     return st.st_size;
 }
 
-static void test_fragment(append89 *w, off_t start, unsigned long length,
-                          const char *data, size_t size)
+/* Remove both files of a ledger created at path. */
+static void test_unlink(const char *path)
 {
-    unsigned char header[24];
-    struct iovec iov[2];
-    unsigned long long v;
-    /* Test fixtures use small offsets. Production uses checked codecs. */
-    v = (unsigned long long)start;
-    u64_store_be(header, v);
-    v = (unsigned long long)length;
-    u64_store_be(header + 8, v);
-    v = (unsigned long long)size;
-    u64_store_be(header + 16, v);
-    iov[0].iov_base = header;
-    iov[0].iov_len = sizeof(header);
-    iov[1].iov_base = (void *)data;
-    iov[1].iov_len = size;
-    assert(append89_appendv(w, iov, 2, NULL) == 0);
+    char buf[160];
+    (void)snprintf(buf, sizeof(buf), "%s.data", path);
+    assert(unlink(buf) == 0);
+    (void)snprintf(buf, sizeof(buf), "%s.index", path);
+    assert(unlink(buf) == 0);
+}
+
+/* Size of the ledger's DATA file. */
+static off_t test_data_size(const char *path)
+{
+    char buf[160];
+    (void)snprintf(buf, sizeof(buf), "%s.data", path);
+    return test_size(buf);
+}
+
+/* Size of the ledger's INDEX file. */
+static off_t test_index_size(const char *path)
+{
+    char buf[160];
+    (void)snprintf(buf, sizeof(buf), "%s.index", path);
+    return test_size(buf);
+}
+
+/* Logical (payload) size of the DATA stream, excluding its append reserve. */
+static off_t test_data_logical_size(const char *path)
+{
+    char buf[160];
+    (void)snprintf(buf, sizeof(buf), "%s.data", path);
+    return test_size(buf) - (off_t)APPEND89_RESERVE;
+}
+
+/* Logical (entry) size of the INDEX stream, excluding its append reserve. */
+static off_t test_index_logical_size(const char *path)
+{
+    char buf[160];
+    (void)snprintf(buf, sizeof(buf), "%s.index", path);
+    return test_size(buf) - (off_t)LEDGER89_TEST_INDEX_RESERVE;
+}
+
+/* Read the DATA stream's logical bytes directly through libappend89. */
+static size_t test_read_data(const char *path, unsigned char *buf, size_t cap)
+{
+    append89 *a;
+    append89_offset pos;
+    char p[160];
+    size_t got;
+    ssize_t n;
+    (void)snprintf(p, sizeof(p), "%s.data", path);
+    assert(append89_open_reader(&a, p) == 0);
+    pos = 0;
+    got = 0U;
+    while ((n = append89_read(a, &pos, buf + got, cap - got)) > 0)
+    {
+        got += (size_t)n;
+    }
+    append89_close(a);
+    return got;
+}
+
+/* Read the INDEX stream's logical bytes directly through libappend89. */
+static size_t test_read_index(const char *path, unsigned char *buf, size_t cap)
+{
+    append89 *a;
+    append89_offset pos;
+    char p[160];
+    size_t got;
+    ssize_t n;
+    (void)snprintf(p, sizeof(p), "%s.index", path);
+    assert(append89_open_reader_reserve(&a, p, LEDGER89_TEST_INDEX_RESERVE) == 0);
+    pos = 0;
+    got = 0U;
+    while ((n = append89_read(a, &pos, buf + got, cap - got)) > 0)
+    {
+        got += (size_t)n;
+    }
+    append89_close(a);
+    return got;
+}
+
+/* Read record n through the random-access API and compare it byte-for-byte.
+ * Records larger than the internal buffer are exercised through iteration. */
+static void test_expect(ledger89 *l, unsigned long long n, const void *data,
+                        size_t size)
+{
+    unsigned char buf[70000];
+    ssize_t got;
+    assert(size <= sizeof(buf));
+    got = ledger89_read(l, n, buf, sizeof(buf));
+    assert(got == (ssize_t)size);
+    assert(memcmp(buf, data, size) == 0);
+    assert(ledger89_length(l, n) == (unsigned long long)size);
+    assert(ledger89_offset_of(l, n) >= 0);
+}
+
+/* Iterate and compare every record to the expected array of payloads. */
+static void test_expect_all(ledger89 *l, const char *const *items,
+                            const size_t *sizes, size_t count)
+{
+    ledger89_iter *it;
+    unsigned char buf[4096];
+    size_t i;
+    size_t done;
+    ssize_t got;
+    assert(ledger89_iter_begin(l, &it) == LEDGER89_OK);
+    for (i = 0U; i < count; ++i)
+    {
+        assert(ledger89_iter_next(it) == LEDGER89_OK);
+        assert(ledger89_iter_index(it) == (unsigned long long)i);
+        assert(ledger89_iter_length(it) == (unsigned long long)sizes[i]);
+        done = 0U;
+        while ((got = ledger89_iter_read(it, buf, sizeof(buf))) > 0)
+        {
+            assert((size_t)got <= sizes[i] - done);
+            assert(memcmp(buf, (const unsigned char *)items[i] + done,
+                          (size_t)got) == 0);
+            done += (size_t)got;
+        }
+        assert(got == 0 && done == sizes[i]);
+    }
+    assert(ledger89_iter_next(it) == LEDGER89_END);
+    ledger89_iter_close(it);
+}
+
+/* Raw helpers: append DATA bytes and INDEX entries via append89 directly, for
+ * crafting on-disk states outside the public append path. */
+static void test_append_data(append89 *w, const void *data, size_t size)
+{
+    assert(append89_append(w, data, size, NULL) == 0);
+}
+
+static void test_append_index(append89 *w, unsigned long long offset,
+                              unsigned long long length,
+                              unsigned long long checksum)
+{
+    unsigned char entry[LEDGER89_TEST_ENTRY_SIZE];
+    test_entry(entry, offset, length, checksum);
+    assert(append89_append(w, entry, LEDGER89_TEST_ENTRY_SIZE, NULL) == 0);
 }
 #endif

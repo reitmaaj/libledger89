@@ -1,120 +1,119 @@
+/* Layer 5: fault-injection tests over the append89 syscall wrapper. */
 #include "support.h"
 
-static void fail_fragment(const char *call, int occurrence, int number)
+static void enospc_write(void)
 {
     char path[160];
-    ledger89 *a;
-    ledger89_message *m;
-    ledger89_offset cursor;
-    ledger89_offset output;
-    test_path(path, sizeof(path), "fault", number);
-    assert(ledger89_create(path, (mode_t)0600, 32U) == 0);
-    assert(ledger89_open_writer(&a, path, 32U) == 0);
+    ledger89 *l;
+    test_path(path, sizeof(path), "fault-enospc", 0);
+    assert(ledger89_create(path, (mode_t)0600) == 0);
+    assert(ledger89_open_writer(&l, path) == 0);
     a89_fault_reset();
-    a89_fault_errno(call, occurrence, ENOSPC);
-    output = -77;
-    assert(ledger89_append(a, "abcdefghijklmno", 15U, &output) == -1);
-    assert(errno == ENOSPC && output == -77);
+    a89_fault_errno("pwrite", 0, ENOSPC);
+    assert(ledger89_append(l, "hello", 5U, NULL) == -1);
+    assert(errno == ENOSPC);
     a89_fault_reset();
-    assert(ledger89_append(a, "replacement", 11U, NULL) == 0);
-    cursor = LEDGER89_BEGIN;
-    test_expect(a, &cursor, "replacement", 11U);
-    assert(ledger89_next(a, &cursor, &m) == LEDGER89_END);
-    ledger89_close(a);
-    assert(unlink(path) == 0);
+    assert(ledger89_append(l, "replacement", 11U, NULL) == 0);
+    test_expect(l, 0ULL, "replacement", 11U);
+    ledger89_close(l);
+    test_unlink(path);
 }
 
-static void retry_short(void)
+static void eio_data_sync(void)
 {
     char path[160];
-    ledger89 *a;
-    ledger89_offset cursor;
-    struct iovec iov[4];
-    int i;
-    test_path(path, sizeof(path), "short", 0);
-    assert(ledger89_create(path, (mode_t)0600, 32U) == 0);
-    assert(ledger89_open_writer(&a, path, 32U) == 0);
-    for (i = 0; i < 4; ++i)
-    {
-        iov[i].iov_base = (void *)"abcde";
-        iov[i].iov_len = i == 1 ? 0U : 5U;
-    }
+    ledger89 *l;
+    unsigned long long count;
+    test_path(path, sizeof(path), "fault-dsync", 0);
+    assert(ledger89_create(path, (mode_t)0600) == 0);
+    assert(ledger89_open_writer(&l, path) == 0);
     a89_fault_reset();
-    a89_fault_short_writes(2U);
-    a89_fault_eintr("pwrite", 1, 3);
-    a89_fault_eintr("fdatasync", 1, 2);
-    a89_fault_eintr("ftruncate", 1, 2);
-    assert(ledger89_appendv(a, iov, 4, NULL) == 0);
-    a89_fault_reset();
-    a89_fault_eintr("pread", 1, 3);
-    cursor = LEDGER89_BEGIN;
-    test_expect(a, &cursor, "abcdeabcdeabcde", 15U);
-    a89_fault_reset();
-    ledger89_close(a);
-    assert(unlink(path) == 0);
-}
-
-static void uncertain(void)
-{
-    char path[160];
-    ledger89 *a;
-    ledger89_offset cursor;
-    test_path(path, sizeof(path), "uncertain", 0);
-    assert(ledger89_create(path, (mode_t)0600, 32U) == 0);
-    assert(ledger89_open_writer(&a, path, 32U) == 0);
-    a89_fault_reset();
-    a89_fault_errno("fcntl", 2, EIO);
-    assert(ledger89_append(a, "hello", 5U, NULL) == -1);
+    a89_fault_errno("fdatasync", 0, EIO);
+    assert(ledger89_append(l, "hello", 5U, NULL) == -1);
     assert(errno == EIO);
     a89_fault_reset();
-    assert(ledger89_append(a, "bad", 3U, NULL) == -1 && errno == EIO);
-    ledger89_close(a);
-    assert(ledger89_open_reader(&a, path, 32U) == 0);
-    cursor = LEDGER89_BEGIN;
-    test_expect(a, &cursor, "hello", 5U);
-    ledger89_close(a);
-    assert(unlink(path) == 0);
+    /* The failed append committed nothing: an empty ledger after recovery. */
+    ledger89_close(l);
+    assert(ledger89_open_writer(&l, path) == 0);
+    assert(ledger89_recover(l, NULL, NULL) == 0);
+    assert(ledger89_count(l, &count) == 0 && count == 0ULL);
+    assert(ledger89_append(l, "replacement", 11U, NULL) == 0);
+    test_expect(l, 0ULL, "replacement", 11U);
+    ledger89_close(l);
+    test_unlink(path);
 }
 
-static void recovery_retry(void)
+static void eio_index_sync_ambiguous(void)
 {
     char path[160];
-    ledger89 *a;
-    append89 *w;
-    ledger89_offset after;
-    ledger89_offset cursor;
-    test_path(path, sizeof(path), "recovery-sync", 0);
-    assert(ledger89_create(path, (mode_t)0600, 32U) == 0);
-    assert(append89_open_writer_reserve(&w, path, (mode_t)0, 32U) == 0);
-    test_fragment(w, LEDGER89_BEGIN, 100UL, "abc", 3U);
-    append89_close(w);
-    assert(ledger89_open_writer(&a, path, 32U) == 0);
+    ledger89 *l;
+    unsigned long long count;
+    test_path(path, sizeof(path), "fault-isync", 0);
+    assert(ledger89_create(path, (mode_t)0600) == 0);
+    assert(ledger89_open_writer(&l, path) == 0);
     a89_fault_reset();
-    a89_fault_errno("fdatasync", 1, EIO);
-    after = -77;
-    assert(ledger89_recover(a, NULL, &after) == -1 && errno == EIO);
-    assert(after == -77);
+    /* Fail the final INDEX synchronization; the entry is already published. */
+    a89_fault_errno("fdatasync", 4, EIO);
+    assert(ledger89_append(l, "hello", 5U, NULL) == -1);
+    assert(errno == EIO);
+    ledger89_close(l);
+    /* After reopen and recovery the committed entry survives. */
+    assert(ledger89_open_writer(&l, path) == 0);
+    assert(ledger89_recover(l, NULL, NULL) == 0);
+    assert(ledger89_count(l, &count) == 0 && count == 1ULL);
+    test_expect(l, 0ULL, "hello", 5U);
+    ledger89_close(l);
+    test_unlink(path);
+}
+
+static void short_writes_eintr(void)
+{
+    char path[160];
+    ledger89 *l;
+    test_path(path, sizeof(path), "fault-short", 0);
+    assert(ledger89_create(path, (mode_t)0600) == 0);
+    assert(ledger89_open_writer(&l, path) == 0);
     a89_fault_reset();
-    /* Stay in maintenance: complete the barrier before allowing new writes. */
-    assert(ledger89_recover(a, NULL, &after) == 0);
-    assert(after == LEDGER89_BEGIN);
-    assert(ledger89_append(a, "safe", 4U, NULL) == 0);
-    cursor = LEDGER89_BEGIN;
-    test_expect(a, &cursor, "safe", 4U);
-    ledger89_close(a);
-    assert(unlink(path) == 0);
+    a89_fault_short_writes(2U);
+    a89_fault_eintr("pwrite", 0, 3);
+    a89_fault_eintr("fdatasync", 0, 2);
+    a89_fault_eintr("ftruncate", 0, 2);
+    assert(ledger89_append(l, "abcdefghijklmno", 15U, NULL) == 0);
+    a89_fault_reset();
+    test_expect(l, 0ULL, "abcdefghijklmno", 15U);
+    ledger89_close(l);
+    test_unlink(path);
+}
+
+static void poisoned_unlock(void)
+{
+    char path[160];
+    ledger89 *l;
+    unsigned long long count;
+    test_path(path, sizeof(path), "fault-unlock", 0);
+    assert(ledger89_create(path, (mode_t)0600) == 0);
+    assert(ledger89_open_writer(&l, path) == 0);
+    a89_fault_reset();
+    /* Fail the final INDEX unlock; the handle is poisoned. */
+    a89_fault_errno("fcntl", 8, EIO);
+    assert(ledger89_append(l, "hello", 5U, NULL) == -1);
+    assert(errno == EIO);
+    a89_fault_reset();
+    assert(ledger89_append(l, "bad", 3U, NULL) == -1 && errno == EIO);
+    ledger89_close(l);
+    /* The record may have committed; recovery resolves it deterministically. */
+    assert(ledger89_open_reader(&l, path) == 0);
+    assert(ledger89_count(l, &count) == 0);
+    ledger89_close(l);
+    test_unlink(path);
 }
 
 int main(void)
 {
-    fail_fragment("pwrite", 1, 0);
-    fail_fragment("pwrite", 3, 1);
-    fail_fragment("fdatasync", 1, 2);
-    fail_fragment("fdatasync", 2, 3);
-    fail_fragment("ftruncate", 1, 4);
-    fail_fragment("ftruncate", 2, 5);
-    retry_short();
-    uncertain();
-    recovery_retry();
+    enospc_write();
+    eio_data_sync();
+    eio_index_sync_ambiguous();
+    short_writes_eintr();
+    poisoned_unlock();
     return 0;
 }

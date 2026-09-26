@@ -1,0 +1,22 @@
+version: 1
+
+compile_commands:
+    gcc: build/gcc/compile_commands.json
+    clang: build/clang/compile_commands.json
+
+project_roots:
+    - src
+    - include
+    - tool
+
+exclude:
+    - build/**
+
+compatibility_paths: []
+
+pure_functions:
+    - ledger89_u64_off_max
+    - ledger89_iter_index
+    - ledger89_iter_offset
+    - ledger89_iter_length
+    - strcmp

@@ -1,111 +1,117 @@
+/* Layer 6: bounded exhaustive crash model. Enumerate every (DATA cut, INDEX
+ * cut) pair for a short append history and prove that recovery always yields a
+ * valid prefix of the append history: never a torn record, never a record
+ * whose earlier neighbor is missing, never fabricated bytes. */
 #include "support.h"
 
-/* Exhaustive prefix-recovery model over multiple messages. For every cut of
- * the physical stream, recovery must retain exactly the complete-record
- * prefix predicted by the encoding, never a torn record or fabricated bytes. */
+#define MODEL_RECORDS 3
 
-#define MODEL_RESERVE 32U
-#define MODEL_CAP 8U /* MODEL_RESERVE - 24 */
-#define MODEL_MSG_COUNT 6
+static const size_t model_sizes[MODEL_RECORDS] = {0U, 1U, 2U};
+static const char *const model_items[MODEL_RECORDS] = {"", "X", "YZ"};
+static off_t model_offsets[MODEL_RECORDS];
 
-static const size_t model_sizes[MODEL_MSG_COUNT] = {0U, 1U, 8U, 9U, 17U, 40U};
-
-static void model_payload(unsigned char *buf, size_t size, unsigned char seed)
+static off_t model_data_end(void)
 {
-    size_t i;
-    for (i = 0U; i < size; ++i)
-    {
-        buf[i] = (unsigned char)(seed + i * 7U);
-    }
-}
-
-/* Physical stream bytes occupied by one message: per-fragment header plus
- * payload. An empty message is a single empty fragment. */
-static size_t model_msg_bytes(size_t size)
-{
-    size_t fragments;
-    fragments = size == 0U ? 1U : 1U + (size - 1U) / MODEL_CAP;
-    return fragments * 24U + size;
-}
-
-/* Complete records retained when the stream ends at `cut` logical bytes. */
-static int model_expected_count(off_t cut)
-{
-    off_t position;
-    int count;
+    off_t end;
     int i;
-
-    position = LEDGER89_BEGIN;
-    count = 0;
-    for (i = 0; i < MODEL_MSG_COUNT; ++i)
+    end = 0;
+    for (i = 0; i < MODEL_RECORDS; ++i)
     {
-        if (position + (off_t)model_msg_bytes(model_sizes[i]) > cut)
+        end += (off_t)model_sizes[i];
+    }
+    return end;
+}
+
+static off_t model_index_end(void)
+{
+    return (off_t)(MODEL_RECORDS * LEDGER89_TEST_ENTRY_SIZE);
+}
+
+/* Number of records fully committed when DATA is cut at data_cut and INDEX is
+ * cut at index_cut. */
+static int model_expected(off_t data_cut, off_t index_cut)
+{
+    int i;
+    int count;
+    count = 0;
+    for (i = 0; i < MODEL_RECORDS; ++i)
+    {
+        if ((off_t)((size_t)(i + 1) * LEDGER89_TEST_ENTRY_SIZE) > index_cut)
         {
-            return count;
+            break;
         }
-        position += (off_t)model_msg_bytes(model_sizes[i]);
+        if (model_offsets[i] + (off_t)model_sizes[i] > data_cut)
+        {
+            break;
+        }
         ++count;
     }
     return count;
 }
 
-static void model_check_cut(off_t cut)
+static void check_cut(off_t data_cut, off_t index_cut)
 {
     char path[160];
-    unsigned char buf[64];
-    unsigned char expected[64];
-    ledger89 *a;
-    ledger89_message *m;
-    ledger89_offset cursor;
-    int count;
+    char data[160];
+    char index[160];
+    ledger89 *l;
+    unsigned long long count;
+    int expected;
     int i;
     int fd;
-
-    test_path(path, sizeof(path), "model", (int)cut);
-    assert(ledger89_create(path, (mode_t)0600, MODEL_RESERVE) == 0);
-    assert(ledger89_open_writer(&a, path, MODEL_RESERVE) == 0);
-    for (i = 0; i < MODEL_MSG_COUNT; ++i)
+    test_path(path, sizeof(path), "model", (int)(data_cut * 100 + index_cut));
+    assert(ledger89_create(path, (mode_t)0600) == 0);
+    assert(ledger89_open_writer(&l, path) == 0);
+    for (i = 0; i < MODEL_RECORDS; ++i)
     {
-        model_payload(buf, model_sizes[i], (unsigned char)(i + 1));
-        assert(ledger89_append(a, model_sizes[i] == 0U ? NULL : buf,
-                               model_sizes[i], NULL) == 0);
+        assert(ledger89_append(l, model_items[i], model_sizes[i], NULL) == 0);
     }
-    assert(ledger89_sync(a) == 0);
-    ledger89_close(a);
-
-    fd = open(path, O_WRONLY);
+    ledger89_close(l);
+    (void)snprintf(data, sizeof(data), "%s.data", path);
+    (void)snprintf(index, sizeof(index), "%s.index", path);
+    fd = open(data, O_WRONLY);
     assert(fd >= 0);
-    assert(ftruncate(fd, cut + (off_t)MODEL_RESERVE) == 0);
+    assert(ftruncate(fd, (off_t)APPEND89_RESERVE + data_cut) == 0);
     assert(close(fd) == 0);
-
-    assert(ledger89_open_writer(&a, path, MODEL_RESERVE) == 0);
-    assert(ledger89_recover(a, NULL, NULL) == 0);
-    count = model_expected_count(cut);
-    cursor = LEDGER89_BEGIN;
-    for (i = 0; i < count; ++i)
+    fd = open(index, O_WRONLY);
+    assert(fd >= 0);
+    assert(ftruncate(fd, (off_t)LEDGER89_TEST_INDEX_RESERVE + index_cut) == 0);
+    assert(close(fd) == 0);
+    assert(ledger89_open_writer(&l, path) == 0);
+    assert(ledger89_recover(l, NULL, NULL) == 0);
+    assert(ledger89_count(l, &count) == 0);
+    expected = model_expected(data_cut, index_cut);
+    assert(count == (unsigned long long)expected);
+    for (i = 0; i < expected; ++i)
     {
-        model_payload(expected, model_sizes[i], (unsigned char)(i + 1));
-        test_expect(a, &cursor, expected, model_sizes[i]);
+        test_expect(l, (unsigned long long)i, model_items[i], model_sizes[i]);
     }
-    assert(ledger89_next(a, &cursor, &m) == LEDGER89_END);
-    ledger89_close(a);
-    assert(unlink(path) == 0);
+    ledger89_close(l);
+    test_unlink(path);
 }
 
 int main(void)
 {
-    off_t end;
-    off_t cut;
+    off_t dmax;
+    off_t imax;
+    off_t dc;
+    off_t ic;
     int i;
-
-    end = LEDGER89_BEGIN;
-    for (i = 0; i < MODEL_MSG_COUNT; ++i)
+    off_t end;
+    end = 0;
+    for (i = 0; i < MODEL_RECORDS; ++i)
     {
-        end += (off_t)model_msg_bytes(model_sizes[i]);
+        model_offsets[i] = end;
+        end += (off_t)model_sizes[i];
     }
-    for (cut = LEDGER89_BEGIN; cut <= end; ++cut)
+    dmax = model_data_end();
+    imax = model_index_end();
+    for (dc = 0; dc <= dmax; ++dc)
     {
-        model_check_cut(cut);
+        for (ic = 0; ic <= imax; ++ic)
+        {
+            check_cut(dc, ic);
+        }
     }
     return 0;
 }

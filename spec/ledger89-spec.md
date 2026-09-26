@@ -1,156 +1,283 @@
-# Fragmented ledger specification (format F1)
+# libledger89 two-file ledger specification (format L1)
 
-## Scope and platform
+## 1. Scope
 
-Opaque messages in one libappend89 logical byte stream. Cooperating processes
-serialize complete message writes through a writer session. Depends on
-libappend89, POSIX. C89 source syntax; 8-bit bytes, signed off_t of at
-most 64 bits, and the append substrate's local-filesystem assumptions.
-No arbitrary corruption detection, checksums, repair of interior corruption,
-rotation, replication, index, snapshot, or exact stable frontier.
+`libledger89` stores a logical append-only sequence of opaque byte records in
+two `libappend89` byte streams named `DATA` and `INDEX`.
 
-## Persistent format
+`DATA` stores the concatenated record payload bytes. `INDEX` stores fixed-size
+encoded record descriptors. The `INDEX` file alone defines record boundaries,
+logical order, and commit state; the `DATA` file alone does not.
 
-All integers use canonical unsigned 64-bit big-endian encoding via native
-`unsigned long long` values.
-Native offsets/lengths must fit positive off_t; reserve must also fit size_t.
+`libledger89` depends on `libappend89` (serialized suffix appends, concurrent
+positional reads, shrink truncation, explicit durability, whole-file writer
+locking) and `libcksum89` (CRC-64/NVME payload checksums). Writers are
+serialized with one ledger-wide exclusive lock covering both files.
 
-The first 16 logical bytes are `"LEDG89F1"` followed by reserve capacity. Reserve
-capacity is immutable and must exceed 24. Open takes this capacity (zero means
-the append default, currently 1 MiB); it validates the header before allowing
-mutation. Changing a build default does not migrate files. Raw append clients
-must never mutate a ledger outside this protocol.
+## 2. Files
 
-Every fragment is:
+A ledger consists of exactly two files:
 
-| Field | Bytes | Meaning |
-| --- | ---: | --- |
-| message_start | 8 | Logical offset of the first fragment header |
-| message_length | 8 | Total message payload, excluding all headers |
-| fragment_length | 8 | This fragment's payload length |
-| payload | fragment_length | Opaque bytes |
+```text
+<name>.data
+<name>.index
+```
 
-The first fragment has message_start equal to its own position. Subsequent
-fragments repeat message_start and message_length. Each header plus payload
-fits within the reserve and is submitted in one append89_appendv call. Fragment
-payloads are positive except for a single-fragment empty message `(start,0,0)`.
-Accumulated payload never exceeds message_length; equality completes a message.
+Both files use `libappend89`. The pair forms one logical storage object.
+Applications MUST NOT modify either file except through `libledger89`.
 
-A new start while accumulating an incomplete message abandons its predecessor.
-The abandoned bytes remain, and readers skip them. Continuations with the wrong
-identity or total length, invalid offsets, overflow and illegal lengths are
-structural corruption. A file-size prefix ending inside an otherwise legal
-fragment is PARTIAL. A complete header cannot diagnose arbitrary corruption of
-its fields or payload; the storage failure model promises exact retained bytes.
+## 3. DATA file
 
-## Creation and opening
+The `DATA` file is the concatenation of committed logical record payloads:
 
-`ledger89_create` constructs a file inside an exclusively created sibling
-temporary directory, writes and synchronizes the preamble, then installs it
-with a non-replacing hard link. Existing target paths fail EEXIST, including
-symlinks. Mode follows umask. Ordinary failures clean up temporary artifacts;
-process death may leave an orphan temporary directory. Only initialized files
-become target paths. Callers synchronize the parent directory for durable
-creation. File sync alone does not make the name durable.
+```text
+record0 || record1 || record2 || ... || recordN
+```
 
-Open never creates or repairs a file. A writer opens its read descriptor before
-its write descriptor. Path replacement is outside the cooperation model. Close
-does not sync. Reader and writer handles permit iteration; only writer handles
-permit append, sync and recovery. Handles are caller-serialized, not internally
-thread-safe. No other same-process descriptor for this inode may be closed
-during an operation: POSIX fcntl locks are process-scoped. The application must
-coordinate all same-inode handles and their lifetime, including reader closes.
-After fork, children close inherited handles and reopen before library use.
+No framing bytes, headers, length prefixes, separators, sentinels, or checksums
+occur in `DATA` unless such bytes belong to the caller's payload.
 
-## Append and failure
+For every committed record `n`:
 
-Append/appendv validate arguments and checked total length, allocate an iovec
-slice array, acquire one writer session and obtain logical EOF. They check the
-complete encoded file-size bound before writing. Each fragment uses slices of
-the caller's payload, without payload copying or a message-sized allocation.
-The payload total is limited by size_t and physical off_t capacity, not reserve.
-Appendv accepts zero vectors as an empty message; vector length overflow fails
-before writing. Caller buffers remain borrowed throughout the call.
+```text
+record[n] = DATA[ entry[n].offset .. entry[n].offset + entry[n].length )
+```
 
-One session covers all publications. Success returns zero and optionally writes
-the first fragment's offset. Failure returns -1 and preserves the output offset.
-An ordinary I/O failure before final publication leaves zero or more complete
-fragments; no complete message from this call is delivered. There is no rollback
-or automatic tail repair. A later message starts at EOF and abandons this one.
+## 4. INDEX file
 
-If session release fails, return -1 with EIO and poison the local handle. The
-message might already be complete; blind retries can duplicate it. Close the
-handle and reconcile the outcome before retrying. Close releases any remaining
-lock. A poisoned handle rejects operations with EIO. Other errors preserve the
-underlying errno, including allocation, capacity and I/O failures.
+The `INDEX` file is a sequence of fixed-size encoded entries. Conceptually:
 
-Completed visible messages are not necessarily durable. `ledger89_sync` holds a
-writer session around append89_sync; success protects the current byte stream
-under the substrate assumptions. It promises neither exactly which unsynced
-messages a later crash retains nor exactly-once delivery.
+```c
+struct ledger89_entry {
+    u64 offset;
+    u64 length;
+};
+```
 
-## Iteration and views
+The encoded entry is 32 bytes, all fields big-endian:
 
-Initialize a cursor to LEDGER89_BEGIN (16). Cursors must identify valid fragment
-boundaries reached by iteration, not arbitrary byte offsets. `ledger89_next`
-validates fragments until it finds a complete message, EOF, an incomplete suffix,
-or an error. It reads headers and probes the final byte of each payload; the
-append prefix invariant ensures preceding bytes exist. It does not checksum
-payloads. Working memory is independent of message length.
+| Field    | Bytes   | Meaning |
+| ---      | ---:    | --- |
+| offset   | 0 .. 7  | Absolute DATA offset of the record start |
+| length   | 8 .. 15 | Payload length |
+| checksum | 16 .. 23 | CRC-64/NVME of `DATA[offset .. offset+length)` |
+| magic    | 24 .. 27 | `0x4c443839` ("LD89") |
+| version  | 28 .. 29 | Format version, currently 1 |
+| flags    | 30 .. 31 | Reserved, MUST be zero |
 
-- OK (0): return a view, advance cursor past the complete message.
-- END (1): no pending message; retain the current boundary.
-- PARTIAL (2): retain the unfinished message start (or torn new header start)
-  for retry. Fully superseded abandoned messages may be skipped.
-- -1: meaningful errno; cursor unchanged, view output NULL.
+```text
+ENTRY_SIZE = 32
+```
 
-END/PARTIAL can change after later appends. Polling rescans the current unfinished
-message. This avoids stateful cursors at the cost of repeated header reads for a
-slow producer. Reads are not snapshots and may observe growth during scanning.
+The `INDEX` file contains `entry0 || entry1 || ... || entryN`. A partial final
+entry does not form part of the valid index.
 
-Views borrow the ledger handle. Close all views before closing it. Payload reads
-return a positive byte count, zero at message end or for a zero-sized request,
-or -1 on error. A call may stop at a fragment boundary. Errors preserve the view
-position. Views return only previously validated complete messages; no tentative
-payload delivery. All access must cease before recovery/shrink. Message offsets
-are locators, not permanently unique IDs: truncation allows suffix offsets to be
-reused. Retained completed message offsets do not change.
+The `magic` and `version` fields let recovery distinguish a structurally valid
+entry from random or torn bytes, independently of entry-size alignment.
 
-## Process death versus system crash
+## 5. Record order
 
-Process death releases the session. Live-kernel fragment publication is whole:
-the next writer computes EOF from file size and appends a new start without
-scanning. Readers skip the abandoned predecessor. They may report PARTIAL while
-a writer is still active and cannot infer death from that status.
+The order of entries in `INDEX` defines the logical ledger order.
 
-System-crash recovery can retain only part of a fragment. The application MUST
-run exclusive recovery before allowing normal writers after such a restart.
-The API cannot enforce cross-process lifecycle admission; no persistent clean
-marker or extra lifecycle lock is provided.
+For all committed records `entry[0].offset = 0`, and for every `n > 0`:
 
-## Exclusive recovery
+```text
+entry[n].offset = entry[n-1].offset + entry[n-1].length
+```
 
-Caller excludes all other access and new openers. Acquire the writer session,
-scan from byte 16, preserve completed messages and abandoned fragments before
-them. A final incomplete message is removed from its start. A torn first header
-following a completed message is removed at that header position. A torn new
-header following an unfinished message conservatively removes that unfinished
-message too. Never trust offsets decoded from a short header.
+Therefore committed data always forms one contiguous prefix of `DATA`. For a
+valid prefix containing `N` entries the committed end is:
 
-Malformed complete headers fail EILSEQ without truncation. On a clean or
-repaired tail, synchronize before returning success. Before/after offsets change
-only on success. A truncate followed by failed sync may already change the live
-file: stay in exclusive recovery and retry; never admit normal writers until
-recovery succeeds. Directory persistence remains the application's concern.
-Recovery requires an initial forward scan; storing message_start eliminates a
-backward search but does not permit locating the final fragment from raw EOF.
+```text
+committed_end = 0                                    if N == 0
+committed_end = entry[N-1].offset + entry[N-1].length otherwise
+```
 
-## Compatibility and verification
+The bytes `DATA[0 .. committed_end)` constitute committed ledger data. Any bytes
+beyond `committed_end` are uncommitted.
 
-This format/API replaces neither the legacy v2 API nor its existing adapters in
-exploratory/libledger89. Select one library at link time. No implicit migration.
-The focused gate is `sh scripts/test-fragmented-ledger.sh`, covering strict C89,
-C++23 header linking, append regressions, process death, every prefix cut in a
-multi-fragment fixture, concurrency, fault injection and structural validation.
-Power-loss prefix-cut tests simulate the specified recovery outcomes; they do
-not validate a filesystem or device's real crash persistence behavior.
+## 6. Empty records
+
+Zero-length logical records are permitted (`entry[n].length = 0`). Its offset
+equals the current committed end, so consecutive zero-length records may share
+an offset. Contiguity holds because `entry[n+1].offset = entry[n].offset + 0`.
+
+## 7. Writer serialization
+
+At most one writer executes a ledger append transaction at a time. The writer
+acquires one ledger-wide exclusive inter-process lock before examining either
+file for append purposes. The lock remains held through DATA append, DATA sync,
+INDEX append, and INDEX sync, and is released only after the transaction
+finishes or fails.
+
+The ledger-wide lock is the `INDEX` stream's writer lock, held with
+`append89_begin`/`append89_end`. The `DATA` stream's own per-call locks are
+short-lived and never overlap another writer because the ledger lock excludes
+them. Readers need not acquire the writer lock; their read algorithm tolerates
+concurrent append and reads only committed INDEX entries.
+
+## 8. Append operation
+
+Given payload `P` of length `L`, `ledger89_append` performs the following steps
+while holding the ledger-wide lock.
+
+1. Obtain the append offset `O = committed_end` from the valid INDEX state.
+2. Append exactly `L` bytes of `P` to `DATA` starting at offset `O`, in chunks
+   no larger than the configured `DATA` reserve. For `L == 0` no DATA byte is
+   written.
+3. Synchronize `DATA` with `append89_sync`. This completes before publication
+   of the corresponding INDEX entry.
+4. Construct `entry = { O, L, checksum, LD89, version, 0 }`, where `checksum`
+   is the CRC-64/NVME of `P`.
+5. Append the complete entry to `INDEX`.
+6. Synchronize `INDEX` with `append89_sync`.
+7. Release the ledger-wide writer lock.
+
+Only after step 6 succeeds may `ledger89_append` report the record as committed.
+
+## 9. Commit definition
+
+A logical record is committed if and only if its complete valid entry belongs
+to the recovered valid prefix of `INDEX`. Presence of payload bytes in `DATA`
+does not commit a record. An INDEX entry is the publication and commit record
+for its corresponding DATA extent.
+
+## 10. Required write ordering
+
+The implementation preserves:
+
+```text
+DATA append  before  DATA sync  before  INDEX append  before  INDEX sync
+```
+
+An INDEX entry is never published before the DATA bytes it references are
+synchronized.
+
+## 11. Append return semantics
+
+`ledger89_append` reports success only after successful INDEX synchronization.
+A failure before that point reports failure. A failed append may leave no new
+bytes, an uncommitted DATA tail, a partial final INDEX entry, or a complete but
+not durably synchronized INDEX entry. Recovery resolves all such states
+deterministically. The caller MUST NOT infer whether a failed append became
+committed solely from the return value after an I/O error during INDEX
+synchronization; after reopening, the recovered INDEX determines the result.
+
+## 12. Startup recovery
+
+Recovery runs under the ledger-wide exclusive lock. Let `D = size(DATA)` and
+`I = size(INDEX)`.
+
+1. **Remove partial INDEX entry.** Compute `I_complete = floor(I / 32) * 32`.
+   If `I != I_complete`, truncate `INDEX` to `I_complete`.
+2. **Validate INDEX prefix.** Initialize `expected = 0`, `valid_entries = 0`.
+   Process complete entries from the beginning. For each entry validate
+   `magic`/`version`/`flags`, `entry.offset == expected`, that
+   `entry.offset + entry.length` does not overflow, that
+   `entry.offset + entry.length <= D`, and that the checksum matches the DATA
+   extent. On any failure stop. On success set `expected = entry.offset +
+   entry.length` and increment `valid_entries`.
+3. **Truncate invalid INDEX suffix.** Truncate `INDEX` to
+   `valid_entries * 32`.
+4. **Truncate uncommitted DATA tail.** If `D > expected`, truncate `DATA` to
+   `expected`.
+5. **Synchronize recovery changes.** Sync each modified file.
+6. **Release the lock.**
+
+## 13. Recovery result
+
+After successful recovery `size(DATA) == committed_end` and
+`size(INDEX) == valid_entries * 32`. Every INDEX entry references an extent
+entirely contained in DATA, and entries describe DATA contiguously from byte
+zero. No uncommitted DATA bytes and no partial or invalid INDEX entries remain.
+Recovery is idempotent.
+
+## 14. Crash cases
+
+| Crash point | Recovered state |
+| --- | --- |
+| before DATA append | DATA/INDEX unchanged |
+| during DATA append | DATA = old prefix + partial bytes; truncated to committed_end |
+| after DATA append, before DATA sync | truncated to committed_end |
+| after DATA sync, before INDEX append | new payload uncommitted; truncated away |
+| during INDEX append | partial final entry removed; DATA truncated |
+| after INDEX append, before INDEX sync | entry may or may not survive; recovered accordingly |
+| after INDEX sync | committed; retained |
+
+## 15. INDEX entry beyond DATA EOF
+
+An entry requiring `entry.offset + entry.length > size(DATA)` is invalid. The
+valid prefix ends immediately before it. Recovery truncates INDEX to the
+preceding valid entry and DATA to the preceding committed end, salvaging the
+longest provably valid ledger prefix.
+
+## 16. Corruption handling
+
+The baseline detects structural inconsistency through INDEX entry alignment,
+magic/version/flags, offset continuity, integer overflow, DATA bounds, and
+checksums. A damaged record ends the valid prefix; recovery never skips a
+damaged record and continues with later records. The ledger always recovers to
+a prefix.
+
+## 17. Reader semantics
+
+A reader derives records exclusively from complete committed INDEX entries. For
+entry `e`, the reader returns `DATA[e.offset .. e.offset + e.length)`. A reader
+never infers records from DATA size or contents. Bytes in DATA lacking a
+committed INDEX entry are invisible. While a writer has appended and
+synchronized DATA but not yet published the INDEX entry, readers observe the
+preceding committed state.
+
+## 18. Reader consistency during concurrent append
+
+Because INDEX publication occurs after DATA synchronization, a reader that
+observes a complete new INDEX entry may read the referenced DATA extent. A
+reader never interprets a partial INDEX entry as valid; it computes
+`complete_entries = floor(size(INDEX) / 32)` and ignores trailing bytes.
+
+## 19. Truncation
+
+Normal public operation does not permit arbitrary truncation of committed
+records. Internal recovery may truncate the INDEX invalid suffix and the DATA
+uncommitted suffix. Only suffix truncation is valid; recovery never removes a
+valid record while preserving a later record.
+
+## 20. Core invariants
+
+After recovery and between completed append transactions:
+
+1. `size(INDEX) % 32 == 0`
+2. For a nonempty ledger, `entry[0].offset == 0`
+3. For every `n > 0`, `entry[n].offset == entry[n-1].offset + entry[n-1].length`
+4. For every entry, `entry[n].offset + entry[n].length <= size(DATA)`
+5. For a recovered ledger, `size(DATA) == committed_end`
+6. A DATA byte range is a record only when a valid committed INDEX entry
+   references it
+7. Any recoverable damaged state resolves to the longest valid ledger prefix
+
+## 21. Conceptual model
+
+```text
+DATA    raw byte arena
+INDEX   framing, ordering, publication, commit record
+libledger89  cross-file coordination, recovery, logical record API
+```
+
+The authoritative ledger state is the valid INDEX prefix; the corresponding
+committed DATA state is exactly `DATA[0 .. committed_end)`.
+
+## 22. Minimal state machine
+
+```text
+CLEAN -> DATA_WRITTEN -> DATA_DURABLE -> INDEX_WRITTEN -> COMMITTED
+```
+
+Recovery maps every non-committed intermediate state back to the previous CLEAN
+state or, when the complete INDEX entry survived, the COMMITTED state. No other
+persistent logical state exists.
+
+## 23. Platform
+
+ISO C89 source dialect; POSIX file I/O via `libappend89`. 8-bit bytes, signed
+`off_t` of at most 64 bits. Public `unsigned long long` values use the native
+type. `_POSIX_C_SOURCE=200809L` is supplied by the build.

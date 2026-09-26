@@ -1,0 +1,24 @@
+#!/bin/sh -eu
+# gen_compile_db <compiler> <outfile>
+#
+# Emit a compile_commands.json for the given compiler, listing every source
+# translation unit under src/ and tool/ with the include paths and feature-test
+# macro needed to parse it. green overrides the diagnostic and language profile,
+# so the command only needs correct includes and the file list.
+
+cc="$1"
+out="$2"
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+mkdir -p "$(dirname "$out")"
+
+printf '[\n' > "$out"
+sep=""
+for f in "$root"/src/*.c "$root"/tool/*.c; do
+    [ -e "$f" ] || continue
+    printf '%s  {\n    "directory": "%s",\n    "command": "%s -c -D_POSIX_C_SOURCE=200809L -I%s/include -I%s/src -I%s/tool -I%s/../libappend89/include -I%s/../libcksum89/include -o /dev/null %s",\n    "file": "%s"\n  }\n' \
+        "$sep" "$root" "$cc" "$root" "$root" "$root" "$root" "$root" "$f" "$f" >> "$out"
+    sep=","
+done
+printf ']\n' >> "$out"

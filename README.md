@@ -1,58 +1,66 @@
-# libledger89: fragmented messages over libappend89
+# libledger89: two-file append-only ledger
 
-New single-file message format. A writer holds one append89 session across its
-fragments; every fragment publishes atomically to live readers. A dead process
-leaves zero or more complete fragments. The next writer starts at EOF without
-scanning or truncating. Readers skip an abandoned message when a new one starts.
+A durable, ordered, append-only sequence of opaque byte records stored in two
+`libappend89` byte streams: a `DATA` file of raw payloads and an `INDEX` file of
+fixed 32-byte descriptors. The `INDEX` file defines record boundaries, order,
+and commit state; the `DATA` file alone does not.
 
-`spec/ledger89-spec.md` defines the format and recovery contract.
+`spec/ledger89-spec.md` defines the format, write ordering, recovery, and crash
+contract.
 
 Build and test from the repository root:
 
 ```sh
-just ledger-build
-just ledger-test
-# Equivalent without just:
-sh scripts/build-fragmented-ledger.sh
-sh scripts/test-fragmented-ledger.sh
+just build
+just test
+just sanitize        # ASan + UBSan
+just check           # test + api-convention
 ```
 
-Link in order: `libledger89.a libappend89.a`. Public includes need
-`libledger89/include` and `libappend89/include`. Compile with the same
-large-file ABI for every library and application (on ILP32 use
-`_FILE_OFFSET_BITS=64`).
+Link in order: `libledger89.a libappend89.a libcksum89.a`. Public includes need
+`libledger89/include`, `libappend89/include`, and `libcksum89/include`.
 
 Minimal lifecycle:
 
 ```c
-ledger89 *a;
-ledger89_message *message;
-ledger89_offset cursor;
+ledger89 *l;
+ledger89_iter *it;
+unsigned long long count;
+unsigned char buf[4096];
+ssize_t n;
 
-/* Check every result in application code. Creation fails if path exists. */
-ledger89_create("events", 0600, 0);
-ledger89_open_writer(&a, "events", 0);
-ledger89_append(a, "hello", 5, NULL);
-ledger89_sync(a);
-cursor = LEDGER89_BEGIN;
-if (ledger89_next(a, &cursor, &message) == LEDGER89_OK)
+ledger89_create("events", 0600);        /* fails if it already exists */
+ledger89_open_writer(&l, "events");
+ledger89_append(l, "hello", 5, NULL);   /* commits: DATA sync + INDEX sync */
+ledger89_append(l, "world", 5, NULL);
+
+ledger89_count(l, &count);              /* 2 */
+ledger89_read(l, 0, buf, sizeof(buf));  /* "hello" */
+
+ledger89_iter_begin(l, &it);
+while (ledger89_iter_next(it) == LEDGER89_OK)
 {
-    /* Read in caller-sized chunks until ledger89_message_read returns zero. */
-    ledger89_message_close(message);
+    while ((n = ledger89_iter_read(it, buf, sizeof(buf))) > 0)
+        /* consume n bytes */;
 }
-ledger89_close(a);
+ledger89_iter_close(it);
+ledger89_close(l);
 ```
 
-Before restarting normal access after a system crash, open a writer and call
-`ledger89_recover` while the application excludes all other access. Recovery
-does not run automatically on open. Do not use it alongside live readers.
+After a system crash, open a writer and call `ledger89_recover` while the
+application excludes all other access. Recovery removes a partial final INDEX
+entry, validates the INDEX prefix (including CRC-64/NVME payload checksums),
+truncates any invalid INDEX suffix and uncommitted DATA tail, and synchronizes
+modified files. It is idempotent and always restores the longest valid prefix.
 
-No checksum, bit-rot detection, rotation, manifests, sequence numbers, or exact
-durability frontier. No message-sized allocation: writes use iovec slices and
-reads expose a constant-size view after validating complete framing.
+Records larger than the append reserve are written in reserve-sized chunks
+within one transaction; there is no artificial maximum record size. Zero-length
+records are permitted.
 
-The legacy `exploratory/libledger89` remains available for its existing adapters.
-Its v2 disk format and API are incompatible with this implementation. Both
-export `ledger89_*`; select one implementation, never link both. This new
-implementation has focused regression gates; it is not a claim of release
-qualification across filesystems and hardware.
+The public API is record-based (`append`/`count`/`read`/`iterate`/`recover`).
+It does not provide a separate `sync`; an append is its own commit point.
+`include/ledger89/admin.h` adds read-only `ledger89_admin_check` and
+`ledger89_admin_repair`.
+
+The legacy single-file fragmented implementation and `exploratory/libledger89`
+are incompatible with this format; select one library, never link both.
