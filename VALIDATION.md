@@ -26,6 +26,15 @@ Executed with GCC and Clang on the available LP64 Linux environment:
 - API convention check with archive symbol audit; the audit confirms the
   removed scan-requiring functions (`ledger89_count`, `ledger89_read`,
   `ledger89_length`, `ledger89_offset_of`) are absent from the archive.
+- Long-running flaky-writer end-to-end scenario (`just e2e`): 16 concurrent
+  writer processes per generation with crashes before publication, after
+  publication, and mid-candidate; injected candidate/publish sync EIO;
+  oversized append attempts (E2BIG); zero-length records; clean shutdowns and
+  respawns; two readers polling the committed prefix outside recovery
+  windows; exclusive, idempotent recovery plus full prefix verification at
+  every quiet point; and final accounting (`acked ⊆ present ⊆ attempted`,
+  no duplicates) against a ~10 MiB final ledger. Verified across several
+  deterministic seeds and under ASan + UBSan (`just e2e-sanitize`).
 
 Commands:
 
@@ -37,6 +46,8 @@ just sanitize
 just valgrind
 just green
 just api-convention
+just e2e
+just e2e-sanitize
 just check
 ```
 

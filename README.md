@@ -19,7 +19,17 @@ just build
 just test
 just sanitize        # ASan + UBSan
 just check           # green + test + api-convention + cli
+just e2e             # long-running flaky-writer scenario (~10 MiB final)
+just e2e-sanitize    # the same under ASan + UBSan
 ```
+
+The flaky end-to-end gate (`test/e2e_flaky.c`, not part of `just test`) runs 16
+concurrent writer processes per generation that occasionally crash at
+controlled points, inject sync failures, shut down and restart, or attempt
+oversized appends; two readers poll the committed prefix; the parent runs
+exclusive recovery and full accounting verification at every quiet point and
+proves `acked ⊆ present ⊆ attempted` with no duplicates. `E2E_SEED` selects
+the deterministic seed (default 1).
 
 Link in order: `libledger89.a libappend89.a libchecksum89.a`. Public includes
 need `libledger89/include`, `libappend89/include`, and `libchecksum89/include`.

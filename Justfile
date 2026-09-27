@@ -84,8 +84,22 @@ valgrind:
 	    valgrind --error-exitcode=1 --leak-check=full ./build/$name || exit 1; \
 	done
 
-# Full nightly gate: strict build, every suite, sanitizers, and Valgrind.
-nightly: test sanitize valgrind
+# Long-running flaky-writer end-to-end scenario: 16 concurrent writers per
+# generation, crashes at three controlled points, injected EIO, oversized
+# attempts, clean shutdowns, exclusive recovery and prefix verification at
+# every quiet point, and ~10 MiB of final ledger. E2E_SEED picks the seed.
+e2e: build
+	{{CC}} {{STRICT}} {{POSIX}} {{CFLAGS}} {{TESTFLAGS}} {{INC}} \
+	    -o build/test_e2e_flaky test/e2e_flaky.c {{FAULT}} {{LIBS}} {{WRAPS}}
+	./build/test_e2e_flaky
+
+# The flaky e2e under ASan + UBSan.
+e2e-sanitize:
+	CFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all" just e2e
+
+# Full nightly gate: strict build, every suite, sanitizers, Valgrind, and the
+# long-running flaky e2e scenario.
+nightly: test sanitize valgrind e2e
 
 api-convention: build
 	sh scripts/check-api-convention.sh --symbols --lib .
