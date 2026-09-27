@@ -519,7 +519,7 @@ FOO89_EINVAL
 
 Use `status`, not `result`, for the operational return code. Reserve `result` for the value produced by an operation.
 
-Use `error` for diagnostic information or a domain object that itself represents an error. For example, `jrpc89_error` correctly names a JSON-RPC error response; it does not name a failure of `libjrpc89`.
+Use `error` for diagnostic information or a domain object that itself represents an error. For example, `jsonrpc89_error` correctly names a JSON-RPC error response; it does not name a failure of `libjsonrpc89`.
 
 ### 14.3 Stable numeric values
 
@@ -851,10 +851,10 @@ The repository currently exposes several incompatible patterns:
 | Library                | Current pattern                                                | Recommended direction                                                                                                                                                              |
 | ---------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `libappend89`          | `-1` plus `errno`, including invented values `2001` and `2002` | Retain POSIX profile, but stop placing project-defined values in `errno`; either map oversize to `E2BIG` and malformed storage to a standard error, or introduce `append89_status` |
-| `libjrpc89`            | Flat status enum mixing protocol-core and transport failures   | Apply signed classification; move transport-only statuses into `<jrpc89/transport.h>`                                                                                              |
+| `libjsonrpc89`            | Flat status enum mixing protocol-core and transport failures   | Apply signed classification; move transport-only statuses into `<jsonrpc89/transport.h>`                                                                                              |
 | `libkv89`              | Domain result enum                                             | Rename the operational type to `kv89_status`; classify not-found/conflict as positive outcomes                                                                                     |
 | `libhm89` / `libadt89` | Status plus structured semantic diagnostics                    | Closest to the proposed convention; separate failure classification from diagnostic payload consistently                                                                           |
-| `libj89`               | sentinel, arena failed flag, mutable textual last error        | Preserve only if arena poisoning forms an intentional abstraction; add a structured status accessor before expanding the API                                                       |
+| `libjson89`               | sentinel, arena failed flag, mutable textual last error        | Preserve only if arena poisoning forms an intentional abstraction; add a structured status accessor before expanding the API                                                       |
 | `libjalg89`            | pointer sentinels for allocation plus status for callbacks     | Acceptable only while pointer constructors can fail solely from allocation; document allocator failure as the single sentinel meaning                                              |
 
 The most urgent correction concerns `libappend89`: `APPEND89_ETOOBIG = 2001` and `APPEND89_EFORMAT = 2002` claim space in the process-wide `errno` domain that the platform owns. The clean choices:
