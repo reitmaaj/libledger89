@@ -39,13 +39,15 @@ Minimal lifecycle:
 ```c
 ledger89 *l;
 ledger89_iter *it;
+ledger89_offset off;
 unsigned char buf[4096];
 ssize_t n;
 
 ledger89_create("events", 0600);        /* fails if it already exists */
 ledger89_open_writer(&l, "events");
-ledger89_append(l, "hello", 5, NULL);   /* commits: one frame, synchronized */
+ledger89_append(l, "hello", 5, &off);   /* commits: one frame, synchronized */
 ledger89_append(l, "world", 5, NULL);
+n = ledger89_read_at(l, off, buf, sizeof(buf)); /* direct read, verifies CRC */
 
 ledger89_iter_begin(l, &it);
 while (ledger89_iter_next(it) == LEDGER89_OK)
@@ -69,6 +71,11 @@ Zero-length records are permitted. Random access by record number
 (`count`/`read`/`length`/`offset_of`) is not provided: locating record N
 requires a scan. Sequential access is iteration; the iterator reports each
 record's index, length, and payload offset.
+
+A payload offset from append or iteration names a record directly.
+`ledger89_read_at` reads that record in O(1) without scanning, validating the
+frame header, size cap, stream bounds, and checksum before returning the
+complete payload. A buffer smaller than the payload fails with E2BIG.
 
 `include/ledger89/admin.h` adds read-only `ledger89_admin_check` and
 `ledger89_admin_repair`.

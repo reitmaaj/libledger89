@@ -36,3 +36,11 @@ I WANT append and forward iteration to need no full-file scans
 SO THAT writers can locate the committed end in O(1) and random-access APIs
 that would require scanning (count, read, length, offset_of) are not part of
 the surface.
+
+## Offset-addressed reader
+
+AS a consumer that retained a payload offset
+I WANT to read that record directly and get its complete checksum-verified
+payload
+SO THAT I do not rescan the ledger, while malformed framing, out-of-bounds
+extents, and checksum damage are still rejected.

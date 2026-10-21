@@ -39,6 +39,12 @@ provided: locating record N requires an O(N) scan, which is unfeasible as a
 public API. Sequential access is iteration; the iterator reports the current
 record's index, length, and payload offset as it walks forward.
 
+A payload offset reported by append or iteration names a record directly.
+`ledger89_read_at` reads that record without scanning, validating the frame
+header, reserve cap, stream bounds, and payload checksum before returning the
+complete payload. This is offset-addressed access, not record-number lookup;
+it cannot prove that an arbitrary interior offset was a record boundary.
+
 Dependencies: `libappend89` (serialized reserve appends, lock-free concurrent
 reads, shrink truncation, explicit durability) and `libchecksum89`
 (CRC-64/NVME).

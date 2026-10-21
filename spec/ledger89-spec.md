@@ -222,6 +222,19 @@ Random access by record number is not provided: `ledger89_count`,
 `ledger89_read`, `ledger89_length`, and `ledger89_offset_of` do not exist in
 format S1, because locating record N requires a scan.
 
+A payload offset obtained from `ledger89_append` or
+`ledger89_iter_offset` names a record directly. `ledger89_read_at` reads that
+record without scanning: it reads the frame header at `payload_offset - 16`,
+validates the size cap, offset representability, stream bounds, and the
+CRC-64/NVME checksum, and then returns the complete payload. A buffer smaller
+than the payload fails with E2BIG rather than returning a partial record. The
+offset must be at least 32. An offset with no frame header fails with EINVAL;
+a partial header, invalid frame, payload ending early, or checksum mismatch
+fails with EILSEQ, and an allocation failure fails with ENOMEM. Because no
+index exists, the operation validates the frame at the supplied position; it
+cannot prove globally that an arbitrary interior offset was a record boundary
+without scanning.
+
 ## 18. Truncation
 
 Normal public operation does not permit arbitrary truncation of committed

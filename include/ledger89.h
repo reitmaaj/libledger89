@@ -15,7 +15,9 @@
  *
  * Random access by record number (count, read by index, length by index,
  * offset by index) is not provided: locating record N requires a scan. Use
- * iteration for sequential access.
+ * iteration for sequential access. A payload offset obtained from append or
+ * iteration names a record directly; ledger89_read_at reads that record
+ * without scanning.
  */
 
 #include <stddef.h>
@@ -90,6 +92,28 @@ extern "C"
      */
     int ledger89_append(ledger89 *l, const void *data, size_t size,
                         ledger89_offset *offset);
+
+    /*
+     * Read one complete record by payload offset. payload_offset must be the
+     * payload offset of a committed record, as reported by ledger89_append or
+     * ledger89_iter_offset. The frame header at payload_offset - 16 is read
+     * directly, so this operation does not scan earlier records.
+     *
+     * The function validates the header, the reserve size cap, offset
+     * representability and overflow, the payload extent within the logical
+     * stream, and the CRC-64/NVME checksum before writing to data. On success
+     * return the payload length and copy the complete payload to data; a
+     * zero-length record returns 0 without writing. data may be NULL only when
+     * size is zero.
+     *
+     * A buffer smaller than the complete payload fails with E2BIG; partial
+     * records are never returned. A missing frame header at the offset fails
+     * with EINVAL. A partial header, oversize or overflowing frame, payload
+     * ending early, or checksum mismatch fails with EILSEQ. An allocation
+     * failure fails with ENOMEM. On failure data is unchanged.
+     */
+    ssize_t ledger89_read_at(ledger89 *l, ledger89_offset payload_offset,
+                             void *data, size_t size);
 
     /*
      * Begin iteration over committed records. On success return LEDGER89_OK

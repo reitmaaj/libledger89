@@ -14,9 +14,10 @@ Executed with GCC and Clang on the available LP64 Linux environment:
   braces) and the canonical clang-format profile.
 - Unit tests for the preamble and frame-header codecs, big-endian scalars,
   and CRC-64/NVME.
-- Smoke, API (including the reserve cap and E2BIG rejection), format,
-  recovery, corruption, crash (kill-before/kill-after/mid-candidate and
-  every prefix cut), fault injection (ENOSPC, EIO, short writes, EINTR,
+- Smoke, API (including the reserve cap and E2BIG rejection), direct read by
+  payload offset (framing, bounds, capacity, checksum, and I/O failures),
+  format, recovery, corruption, crash (kill-before/kill-after/mid-candidate
+  and every prefix cut), fault injection (ENOSPC, EIO, short writes, EINTR,
   poisoned unlock), fuzz, exhaustive prefix model, property, concurrent
   writers, concurrent end-to-end readers, stress (20k records, maximum-size
   record, 5k empty records), admin, and CLI suites.

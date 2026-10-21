@@ -13,6 +13,8 @@ Specification in `spec/ledger89-spec.md` is normative.
 
 Random access by record number (count, read, length, offset_of) is deliberately
 absent: locating record N requires a scan. Sequential access is iteration.
+A payload offset from append or iteration can be read directly with
+`ledger89_read_at`, which validates framing, bounds, and checksum in O(1).
 The two-file (DATA+INDEX) format L1 lives under git tag `two-file-v1`.
 
 Do not confuse this implementation with the fragmented single-file experiment

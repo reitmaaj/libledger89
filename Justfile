@@ -75,8 +75,9 @@ sanitize:
 valgrind:
 	@command -v valgrind >/dev/null 2>&1 || { echo "valgrind: SKIPPED: not installed"; exit 0; }
 	just build
-	@for t in test/test_smoke.c test/test_unit.c test/test_api.c test/test_format.c \
-	    test/test_recovery.c test/test_fault.c test/test_model.c test/test_corrupt.c; do \
+	@for t in test/test_smoke.c test/test_unit.c test/test_api.c \
+	    test/test_read_at.c test/test_format.c test/test_recovery.c \
+	    test/test_fault.c test/test_model.c test/test_corrupt.c; do \
 	    [ -e "$t" ] || continue; \
 	    name=$(basename "$t" .c); \
 	    {{CC}} {{STRICT}} {{POSIX}} {{TESTFLAGS}} {{INC}} \

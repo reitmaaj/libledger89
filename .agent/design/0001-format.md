@@ -86,3 +86,9 @@ position (a short header means end-of-stream), validates the size cap, and
 streams the payload while verifying the CRC. A live reader never observes a
 torn frame because publication is whole; a payload ending early (external
 damage) fails EILSEQ.
+
+`ledger89_read_at` uses the same framing rules from a supplied payload offset:
+it reads the header at `payload_offset - 16`, validates the cap, offset
+representability, and stream bounds, verifies the CRC over the whole payload,
+and only then copies the payload to the caller's buffer. It is O(1) because it
+never scans records before the offset.

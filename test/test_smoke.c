@@ -7,6 +7,7 @@ int main(void)
     char path[160];
     ledger89 *l;
     ledger89_offset off;
+    unsigned char byte;
     static const char *const items[] = {"A", "B"};
     static const size_t sizes[] = {1U, 1U};
     test_path(path, sizeof(path), "smoke", 0);
@@ -14,6 +15,8 @@ int main(void)
     assert(ledger89_open_writer(&l, path) == 0);
     assert(ledger89_append(l, "A", 1U, &off) == 0);
     assert(off == (ledger89_offset)32);
+    assert(ledger89_read_at(l, off, &byte, sizeof(byte)) == 1);
+    assert(byte == 'A');
     assert(ledger89_append(l, "B", 1U, NULL) == 0);
     ledger89_close(l);
 

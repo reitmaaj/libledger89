@@ -28,6 +28,10 @@
 7. `ledger89_iter_index`, `ledger89_iter_length`, and `ledger89_iter_offset`
    report the current record's number, payload length, and payload offset.
 
+8. `ledger89_read_at` reads a committed record directly from its payload
+   offset, without scanning, after validating framing, bounds, and checksum.
+   Details are in `0004-read-at.md`.
+
 ## Must reject
 
 1. Opening a missing path, a directory, or a wrong-reserve file MUST fail
@@ -43,9 +47,11 @@
 5. Invalid arguments (NULL out, NULL data with nonzero size) MUST fail with
    EINVAL or EOVERFLOW before any I/O.
 
-6. The public API MUST NOT expose random-access functions that require a scan
-   (`ledger89_count`, `ledger89_read`, `ledger89_length`,
-   `ledger89_offset_of`); the archive symbol audit enforces their absence.
+6. The public API MUST NOT expose record-number-based random-access functions
+   that require a scan (`ledger89_count`, `ledger89_read`,
+   `ledger89_length`, `ledger89_offset_of`); the archive symbol audit enforces
+   their absence. Offset-addressed `ledger89_read_at` is not in this class: it
+   locates the record from the supplied payload offset in O(1).
 
 ## Unacceptable behavior
 

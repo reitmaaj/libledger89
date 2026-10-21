@@ -388,6 +388,34 @@ int ledger89_priv_read_exact(append89 *r, off_t *pos, unsigned char *out,
     return 1;
 }
 
+/* Read a frame header at frame. Returns the number of header bytes available
+ * (0 at the logical end, fewer than 16 for a partial header), or -1 with errno
+ * from the read. */
+static int
+ledger89_priv_read_header_at(append89 *r, off_t frame,
+                             unsigned char raw[LEDGER89_PRIV_HEADER_SIZE])
+{
+    size_t got;
+    ssize_t n;
+
+    got = 0U;
+    while (got < LEDGER89_PRIV_HEADER_SIZE)
+    {
+        n = append89_read(r, &frame, raw + got,
+                          LEDGER89_PRIV_HEADER_SIZE - got);
+        if (n < 0)
+        {
+            return -1;
+        }
+        if (n == 0)
+        {
+            break;
+        }
+        got = ledger89_priv_grow_got(got, n);
+    }
+    return (int)got;
+}
+
 static int ledger89_priv_crc_step(append89 *r, off_t *pos, off_t *left,
                                   checksum89_crc64_nvme_ctx *ctx)
 {
@@ -777,6 +805,164 @@ ssize_t ledger89_iter_read(ledger89_iter *it, void *data, size_t size)
         }
     }
     return n;
+}
+
+/* Read and structurally validate the frame header preceding payload_offset.
+ * The offset itself must already have passed the minimum-offset check. */
+static int ledger89_priv_read_at_header(ledger89 *l, off_t payload_offset,
+                                        struct ledger89_priv_header *h,
+                                        off_t *len)
+{
+    unsigned char raw[LEDGER89_PRIV_HEADER_SIZE];
+    off_t frame;
+    size_t capacity;
+    int got;
+    int rc;
+
+    frame = payload_offset - (off_t)LEDGER89_PRIV_HEADER_SIZE;
+    got = ledger89_priv_read_header_at(l->r, frame, raw);
+    if (got < 0)
+    {
+        return -1;
+    }
+    if (got == 0)
+    {
+        ledger89_priv_error(EINVAL);
+        return -1;
+    }
+    if (got != (int)LEDGER89_PRIV_HEADER_SIZE)
+    {
+        ledger89_priv_error(EILSEQ);
+        return -1;
+    }
+    ledger89_priv_header_decode(raw, h);
+    rc = ledger89_u64_to_off(h->size, len);
+    if (rc != 0)
+    {
+        ledger89_priv_error(EILSEQ);
+        return -1;
+    }
+    capacity = append89_capacity(l->r);
+    if ((unsigned long long)*len +
+            (unsigned long long)LEDGER89_PRIV_HEADER_SIZE >
+        (unsigned long long)capacity)
+    {
+        ledger89_priv_error(EILSEQ);
+        return -1;
+    }
+    rc = ledger89_priv_frame_fits(frame, *len);
+    if (rc == 0)
+    {
+        ledger89_priv_error(EILSEQ);
+        return -1;
+    }
+    return 0;
+}
+
+/* Release a private payload buffer and report one failure. */
+static int ledger89_priv_read_at_fail(unsigned char *tmp, int err)
+{
+    free(tmp);
+    ledger89_priv_error(err);
+    return -1;
+}
+
+/* Read one payload into a private buffer, verify its checksum, and only then
+ * copy it to the caller's buffer. This leaves the caller's buffer unchanged on
+ * any failure. A zero-length payload is verified without touching data. */
+static int ledger89_priv_read_at_payload(ledger89 *l, off_t payload_offset,
+                                         unsigned long long expected,
+                                         unsigned char *data, off_t len)
+{
+    unsigned char *tmp;
+    unsigned long long crc;
+    off_t pos;
+    size_t size;
+    int rc;
+
+    size = (size_t)len;
+    if (size == 0U)
+    {
+        crc = ledger89_priv_crc_data(NULL, 0U);
+        if (crc != expected)
+        {
+            ledger89_priv_error(EILSEQ);
+            return -1;
+        }
+        return 0;
+    }
+    tmp = (unsigned char *)malloc(size);
+    if (tmp == NULL)
+    {
+        ledger89_priv_error(ENOMEM);
+        return -1;
+    }
+    pos = payload_offset;
+    rc = ledger89_priv_read_exact(l->r, &pos, tmp, size);
+    if (rc < 0)
+    {
+        rc = ledger89_priv_read_at_fail(tmp, errno);
+        return rc;
+    }
+    if (rc == 0)
+    {
+        rc = ledger89_priv_read_at_fail(tmp, EILSEQ);
+        return rc;
+    }
+    crc = ledger89_priv_crc_data(tmp, size);
+    if (crc != expected)
+    {
+        rc = ledger89_priv_read_at_fail(tmp, EILSEQ);
+        return rc;
+    }
+    memcpy(data, tmp, size);
+    free(tmp);
+    return 0;
+}
+
+ssize_t ledger89_read_at(ledger89 *l, ledger89_offset payload_offset,
+                         void *data, size_t size)
+{
+    struct ledger89_priv_header h;
+    off_t len;
+    int rc;
+
+    rc = ledger89_priv_usable(l, 0);
+    if (rc != 0)
+    {
+        return -1;
+    }
+    if (size > 0U)
+    {
+        if (data == NULL)
+        {
+            ledger89_priv_error(EINVAL);
+            return -1;
+        }
+    }
+    if (payload_offset < (ledger89_offset)(LEDGER89_PRIV_PREAMBLE_SIZE +
+                                           LEDGER89_PRIV_HEADER_SIZE))
+    {
+        ledger89_priv_error(EINVAL);
+        return -1;
+    }
+    rc = ledger89_priv_read_at_header(l, payload_offset, &h, &len);
+    if (rc != 0)
+    {
+        return -1;
+    }
+    if ((unsigned long long)len > (unsigned long long)size)
+    {
+        ledger89_priv_error(E2BIG);
+        return -1;
+    }
+    rc = ledger89_priv_read_at_payload(l, payload_offset, h.checksum,
+                                       (unsigned char *)data, len);
+    if (rc != 0)
+    {
+        return -1;
+    }
+    return len;
 }
 
 void ledger89_iter_close(ledger89_iter *it)
